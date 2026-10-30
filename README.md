@@ -1,611 +1,255 @@
 # CodeBox
 
-**A blazing-fast, sandboxed code execution engine customized with custom multi-file orchestration and pure execution semantics.**
+A high-performance, sandboxed code execution engine built with Node.js, Express, Docker, and Linux sandboxing (Isolate / cgroups v2). 
 
-> Originally developed as part of the [ChaiCode](https://chaicode.com) / Chai aur Code ecosystem. Special thanks and credits to **Chai aur Code** & **Hitesh Choudhary** for the foundational architecture.
+CodeBox is designed strictly as a **pure code execution engine**—it compiles code, executes it inside hardened sandboxes with resource limits (CPU, memory, wall time), and returns execution telemetry (`stdout`, `stderr`, execution duration, peak memory, and exit codes) without forced grading or output comparison.
+
+> Credits: Based upon the original CodeBox project by Chai aur Code / Hitesh Choudhary, updated and enhanced with pure execution semantics, native multi-file JSON orchestration, and simplified language management.
 
 ---
 
-## What is CodeBox?
+## Key Features
 
-CodeBox is a high-performance code execution service designed for running user-submitted code in securely isolated environments. Unlike standard evaluation systems, this edition focuses strictly on **pure execution** (compilation, standard I/O piping, resource telemetry, and sandbox management), decoupling code execution from test grading.
-
-### Key Features & Custom Improvements
-
-- **Pure Execution Engine** - Focuses strictly on executing code and returning stdout, stderr, execution time, peak memory, and exit codes without forced string comparison or grading.
-- **Native Multi-File Submissions (`POST /submissions/multi`)** - Send multiple files as structured JSON (no zip/base64 required), compile once, and execute multiple entry points sequentially inside a single shared sandbox.
-- **Sequential Language IDs** - Simplified clean IDs:
+- **Pure Execution Focus**: Decouples code execution from test case evaluation. Executes untrusted code and returns raw outputs and process metrics.
+- **Single & Multi-File Execution**:
+  - `POST /submissions`: Standard single-file code runs.
+  - `POST /submissions/multi`: Native JSON multi-file orchestration. Compiles all files once and executes multiple entry points sequentially inside the same sandbox.
+- **Batch Processing**: Run multiple independent single-file or multi-file submissions in a single request.
+- **Hardened Sandboxing**:
+  - Drops all Linux capabilities (`CapDrop: ALL`), enforces `no-new-privileges`.
+  - Read-only root filesystem with isolated in-memory `tmpfs` mounts for `/box` and `/tmp`.
+  - Resource limits: strict CPU quotas, memory caps with swap disabled, and PID limits.
+  - Supports both **Docker** and **Isolate** (Linux namespaces/cgroups v2) execution backends.
+- **Clean Sequential Language IDs**:
   - `1`: C (GCC 9.4.0)
   - `2`: C++ (GCC 9.4.0)
   - `3`: Java (OpenJDK 17)
   - `4`: JavaScript (Node.js 18.15.0)
   - `5`: Python (3.8.10)
   - `6`: TypeScript (5.0.3)
-- **Dual / Tri-Execution Engines** - Isolate (cgroups v2 namespaces), Firecracker microVMs, and Docker containers with auto-detection.
-- **Batch Submissions** - Run multiple test cases in a single request for both single-file and multi-file codebases.
-- **Production Ready** - Redis queue, Prometheus metrics, and reverse proxy support.
+- **Production Architecture**: Asynchronous Redis job queue (BullMQ), Prometheus telemetry (`/metrics`), and Caddy / Nginx reverse proxy support.
 
 ---
 
-## Credits & Acknowledgements
-
-This project builds upon the original CodeBox engine created by **Hitesh Choudhary** and the **Chai aur Code** team. We extend our gratitude to Chai aur Code for the open-source base. These updates introduce custom architectural improvements including pure execution semantics, native multi-file JSON schemas, and refactored language configurations.
-
----
-
-## How It Works
+## System Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   ChaiCode   │────▶│   CodeBox    │────▶│    Redis     │────▶│   Workers    │
-│   Frontend   │     │     API      │     │    Queue     │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────┬───────┘
-                                                                      │
-                                                    ┌─────────────────┴─────────────────┐
-                                                    │                                   │
-                                             ┌──────▼──────┐                    ┌───────▼──────┐
-                                             │ Firecracker │                    │    Docker    │
-                                             │  (microVM)  │        OR          │  (container) │
-                                             └──────┬──────┘                    └───────┬──────┘
-                                                    │                                   │
-                                                    └─────────────┬─────────────────────┘
-                                                                  │
-                                                    ┌─────────────▼─────────────┐
-                                                    │  Sandboxed Code Execution │
-                                                    │  (isolated, time-limited) │
-                                                    └───────────────────────────┘
+┌────────────────┐      ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
+│  API Clients   │─────▶│  CodeBox API   │─────▶│  Redis Queue   │─────▶│ Worker Service │
+│  (Frontend/IDE)│      │  (Port 3000)   │      │   (BullMQ)     │      │ (Concurrency)  │
+└────────────────┘      └────────────────┘      └────────────────┘      └───────┬────────┘
+                                                                                │
+                                                                 ┌──────────────┴──────────────┐
+                                                                 │                             │
+                                                          ┌──────▼──────┐               ┌──────▼──────┐
+                                                          │   Isolate   │      OR       │   Docker    │
+                                                          │  (cgroups)  │               │ (Container) │
+                                                          └──────┬──────┘               └──────┬──────┘
+                                                                 │                             │
+                                                                 └──────────────┬──────────────┘
+                                                                                │
+                                                                 ┌──────────────▼──────────────┐
+                                                                 │  Sandboxed Code Execution   │
+                                                                 │  (CPU/RAM/Time Restricted)  │
+                                                                 └─────────────────────────────┘
 ```
 
 ---
 
-## Running CodeBox
+## Quick Start (Local Development)
 
-Pick the row that matches your situation.
+### Prerequisites
+- Docker & Docker Compose
+- Node.js 20+
 
-| Mode | You need | URL you end up with | TLS | Build? |
-|------|----------|---------------------|-----|--------|
-| **Fastest path** | A server + Docker | `http://<server-ip>` | none | no — pulls from Docker Hub |
-| **1. Local** | A laptop with Docker | `http://localhost:3000` | none | yes |
-| **2. Server, no domain** | A server + its IP | `http://<server-ip>` | none | yes |
-| **3. Server + domain** | A server + a DNS A record | `https://codebox.example.com` | automatic | yes |
+### Setup & Run
 
-If you just want CodeBox running on a VPS and are not changing the code, use
-the **fastest path** — one file, no clone, no build. Modes 2 and 3 build from
-source and are otherwise identical to each other; the only difference between
-them is whether `DOMAIN` is set in `.env`, and you can move from one to the
-other later without rebuilding.
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/bharathandukuri/Codebox.git
+   cd Codebox
+   npm install
+   ```
+
+2. **Build the language runtime images**:
+   ```bash
+   ./scripts/build-images.sh
+   ```
+
+3. **Start the stack** (API, Worker, Redis):
+   ```bash
+   docker compose up -d
+   ```
+
+4. **Verify Health**:
+   ```bash
+   curl http://localhost:3000/health
+   ```
 
 ---
 
-### Mode 1 — Local development
+## API Usage Examples
 
-Runs the API, a worker and Redis on your machine using the Docker executor.
-No domain, no reverse proxy, no SSL.
+Default development authentication token: `dev-token` (header: `X-Auth-Token: dev-token`).
 
-**Prerequisites:** Docker Desktop, Node.js 20+
-
-```bash
-git clone https://github.com/hiteshchoudhary/Codebox.git
-cd Codebox
-
-npm install
-
-# Build the language runtime images (python, node, gcc, java, ...)
-./scripts/build-images.sh
-
-# Start API + worker + Redis
-docker compose up -d
-
-curl http://localhost:3000/health
-```
-
-The dev stack ships with the token `dev-token` already set:
-
+### 1. Single-File Code Execution
 ```bash
 curl -X POST "http://localhost:3000/submissions?wait=true" \
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: dev-token" \
-  -d '{"source_code": "print(\"Chai aur Code!\")", "language_id": 5}'
+  -d '{
+    "language_id": 5,
+    "source_code": "import sys\nprint(f\"Hello, {sys.stdin.read().strip()}!\")",
+    "stdin": "CodeBox"
+  }'
 ```
 
-The API is on port 3000 directly — Caddy is not involved in this mode.
+**Response**:
+```json
+{
+  "token": "4a7b3c2d-...",
+  "type": "single",
+  "source_code": "import sys\n...",
+  "language_id": 5,
+  "stdin": "CodeBox",
+  "stdout": "Hello, CodeBox!\n",
+  "stderr": null,
+  "compile_output": null,
+  "status": { "id": 3, "description": "Accepted" },
+  "time": "0.035",
+  "wall_time": "0.040",
+  "memory": 12480,
+  "exit_code": 0
+}
+```
 
 ---
 
-### Fastest path — one file, no clone, no build
-
-Prebuilt images are published to Docker Hub, and the production stack needs
-**no language images**: the worker image already bundles gcc, JDK 17, Python,
-Node and TypeScript, and isolate runs the code inside that container. So a
-whole deployment is one file plus a `.env`.
-
-On a fresh server with Docker installed:
+### 2. Multi-File Code Execution (`POST /submissions/multi`)
+Send multiple files as JSON. All files are compiled once inside a single sandbox, and multiple entry points are run sequentially in the same environment.
 
 ```bash
-mkdir -p /opt/codebox && cd /opt/codebox
-
-# Grab the single-file compose
-curl -fsSLO https://raw.githubusercontent.com/hiteshchoudhary/Codebox/main/docker-compose.hub.yml
-mv docker-compose.hub.yml docker-compose.yml
-
-# Generate secrets and write .env
-cat > .env <<EOF
-AUTH_TOKEN=$(openssl rand -hex 32)
-METRICS_TOKEN=$(openssl rand -hex 16)
-GRAFANA_PASSWORD=$(openssl rand -hex 16)
-
-# Leave DOMAIN blank for plain HTTP on this server's IP.
-# Set it to a domain with an A record here for automatic HTTPS.
-DOMAIN=
-
-# Size these to the server. WORKER_CPUS must not exceed its vCPU count.
-WORKER_CPUS=1.5
-WORKER_MEMORY=4G
-WORKER_CONCURRENCY=2
-EOF
-
-docker compose up -d
-```
-
-Then check it and grab your token:
-
-```bash
-curl http://localhost/health
-grep AUTH_TOKEN .env
-```
-
-`docker-compose.hub.yml` carries the Caddy and Prometheus configs inline as
-Compose `configs`, so there are genuinely no other files to copy. If you would
-rather paste than curl, open the file on GitHub and paste it straight into
-`docker-compose.yml` on the server — it needs Docker Compose v2.23 or newer
-(`docker compose version`).
-
-To upgrade later:
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-Pin a release instead of tracking `latest` by adding `CODEBOX_VERSION=v1.2.3`
-to `.env`.
-
-> This path uses the prebuilt images. Build from source instead — modes 2 and 3
-> below — when you have changed the code.
-
----
-
-### Mode 2 — Server without a domain (IP only, no SSL)
-
-Use this when you have a VPS but no domain yet, or you are running CodeBox on a
-private network. CodeBox is served as plain HTTP on port 80 of the server's IP.
-**No DNS record and no certificate are required.**
-
-```bash
-ssh root@<server-ip>
-
-git clone https://github.com/hiteshchoudhary/Codebox.git /opt/codebox
-cd /opt/codebox
-
-# Run setup with NO argument -> IP mode
-./scripts/setup-production.sh
-```
-
-The script installs Docker, opens the firewall, generates an API token, builds
-the images and starts everything. When it finishes it prints your URL and token.
-
-**Doing it by hand instead:**
-
-```bash
-cp .env.example .env
-# Set AUTH_TOKEN. Leave DOMAIN blank -- that is what selects IP mode.
-nano .env
-
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
-Verify from your own machine:
-
-```bash
-curl http://<server-ip>/health
-
-curl -X POST "http://<server-ip>/submissions?wait=true" \
+curl -X POST "http://localhost:3000/submissions/multi?wait=true" \
   -H "Content-Type: application/json" \
-  -H "X-Auth-Token: <your-token>" \
-  -d '{"source_code": "print(2+2)", "language_id": 71}'
+  -H "X-Auth-Token: dev-token" \
+  -d '{
+    "language_id": 3,
+    "files": [
+      {
+        "path": "models/User.java",
+        "content": "package models;\npublic class User {\n  public String name;\n  public User(String name) { this.name = name; }\n}"
+      },
+      {
+        "path": "Main.java",
+        "content": "import models.User;\npublic class Main {\n  public static void main(String[] args) {\n    User u = new User(\"Alice\");\n    System.out.println(\"User: \" + u.name);\n  }\n}"
+      },
+      {
+        "path": "Test.java",
+        "content": "public class Test {\n  public static void main(String[] args) {\n    System.out.println(\"Tests passed\");\n  }\n}"
+      }
+    ],
+    "compileOrder": [
+      "models/User.java",
+      "Main.java",
+      "Test.java"
+    ],
+    "executions": [
+      { "entryPoint": "Main.java", "stdin": "" },
+      { "entryPoint": "Test.java", "stdin": "" }
+    ]
+  }'
 ```
 
-> **Note the trade-off.** Without TLS, requests and your `X-Auth-Token` cross
-> the network in cleartext. That is fine for a private network, an internal
-> tool, or a staging box. Do not put a public production frontend on it —
-> use mode 3 instead, which is a one-line change.
+**Response**:
+```json
+{
+  "token": "d8e9f0a1-...",
+  "type": "multi",
+  "language_id": 3,
+  "status": { "id": 3, "description": "Accepted" },
+  "compile": {
+    "status": { "id": 3, "description": "Accepted" },
+    "output": null,
+    "wall_time": "0.450"
+  },
+  "executions": [
+    {
+      "entryPoint": "Main.java",
+      "status": { "id": 3, "description": "Accepted" },
+      "stdout": "User: Alice\n",
+      "stderr": null,
+      "exit_code": 0,
+      "time": "0.080",
+      "wall_time": "0.085"
+    },
+    {
+      "entryPoint": "Test.java",
+      "status": { "id": 3, "description": "Accepted" },
+      "stdout": "Tests passed\n",
+      "stderr": null,
+      "exit_code": 0,
+      "time": "0.050",
+      "wall_time": "0.055"
+    }
+  ]
+}
+```
 
 ---
 
-### Mode 3 — Server with a domain and HTTPS
-
-Same stack as mode 2, plus a certificate. Caddy obtains and renews it from
-Let's Encrypt automatically — there is no certbot step and no cron job.
-
-**Before you start,** point an `A` record at the server and confirm it resolves:
-
-```bash
-dig +short codebox.example.com     # must print your server's IP
-```
-
-Ports **80 and 443** must both be reachable from the internet. Port 80 is not
-optional — Let's Encrypt uses it to validate the domain. Check your provider's
-panel firewall (Hostinger, DigitalOcean, AWS security groups) as well as `ufw`.
-
-```bash
-ssh root@<server-ip>
-
-git clone https://github.com/hiteshchoudhary/Codebox.git /opt/codebox
-cd /opt/codebox
-
-# Pass the domain as the argument -> HTTPS mode
-./scripts/setup-production.sh codebox.example.com
-```
-
-**Doing it by hand instead:**
-
-```bash
-cp .env.example .env
-# Set AUTH_TOKEN, and set DOMAIN=codebox.example.com
-nano .env
-
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
-Verify:
-
-```bash
-curl https://codebox.example.com/health
-```
-
-HTTP is redirected to HTTPS automatically.
-
----
-
-### Switching from mode 2 to mode 3 later
-
-Nothing is rebuilt and no data is lost:
-
-```bash
-# 1. Point an A record at the server, wait for it to resolve
-dig +short codebox.example.com
-
-# 2. Set the domain
-nano .env                 # DOMAIN=codebox.example.com
-
-# 3. Recreate Caddy
-docker compose -f docker-compose.prod.yml up -d
-```
-
-Caddy picks up the domain, requests a certificate and starts serving HTTPS
-within a few seconds. To go back to IP mode, blank out `DOMAIN` and re-run
-the same command.
-
----
-
-### How the two server modes actually differ
-
-One variable. `docker-compose.prod.yml` turns `DOMAIN` into Caddy's site
-address:
-
-```yaml
-- SITE_ADDRESS=${DOMAIN:-:80}
-```
-
-| `DOMAIN` in `.env` | Caddy site address | Result |
-|--------------------|--------------------|--------|
-| blank or absent | `:80` | Serves HTTP on every IP and hostname. Caddy never requests a certificate and never binds 443. |
-| `codebox.example.com` | `codebox.example.com` | Binds 80 and 443, obtains a certificate, redirects HTTP to HTTPS. |
-
-Caddy only attempts certificate issuance when the site address carries a
-hostname, so IP mode cannot fail on a DNS or ACME error.
-
----
-
-### Server sizing
-
-| Load | Specs | Notes |
-|------|-------|-------|
-| **Light** (< 100 submissions/hr) | 2 vCPU, 4GB RAM | Set `WORKER_CPUS=1.5`, `WORKER_MEMORY=3G` |
-| **Medium** (< 1000 submissions/hr) | 4 vCPU, 8GB RAM | Defaults in `.env.example` fit here |
-| **Heavy** (> 1000 submissions/hr) | 8 vCPU, 16GB RAM | Raise `WORKER_CPUS`, `WORKER_MEMORY`, `WORKER_CONCURRENCY` |
-
-> `WORKER_CPUS` must never exceed the host's vCPU count — Docker refuses to
-> start the container with `Range of CPUs is from 0.01 to N.00`. All resource
-> limits are tunable in `.env`; see the block at the bottom of `.env.example`.
-
-> For Firecracker support, choose a host with dedicated vCPUs and nested
-> virtualisation (`/dev/kvm` must exist). Most shared VPS plans do not offer
-> it — CodeBox falls back to isolate or Docker automatically.
-
----
-
-## Production Hardening (Optional)
-
-Secure your droplet before deploying. Run these commands as `root`.
-
-### 1. Create Deploy User
-
-```bash
-# Create user with sudo access
-adduser deploy
-usermod -aG sudo deploy
-usermod -aG docker deploy
-
-# Copy SSH keys to new user
-mkdir -p /home/deploy/.ssh
-cp ~/.ssh/authorized_keys /home/deploy/.ssh/
-chown -R deploy:deploy /home/deploy/.ssh
-chmod 700 /home/deploy/.ssh
-chmod 600 /home/deploy/.ssh/authorized_keys
-```
-
-### 2. Disable Root & Password Login
-
-```bash
-# Edit SSH config
-nano /etc/ssh/sshd_config
-```
-
-Update these lines:
-```
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-```
-
-```bash
-# Restart SSH
-systemctl restart sshd
-```
-
-> **Warning:** Make sure you can login as `deploy` user before disabling root!
-
-### 3. Configure Firewall
-
-```bash
-# Allow only essential ports
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp    # SSH
-ufw allow 80/tcp    # HTTP
-ufw allow 443/tcp   # HTTPS
-ufw enable
-```
-
-### 4. Enable Automatic Security Updates
-
-```bash
-apt install unattended-upgrades
-dpkg-reconfigure -plow unattended-upgrades
-```
-
-### 5. Install Fail2Ban (Block Brute Force)
-
-```bash
-apt install fail2ban
-systemctl enable fail2ban
-systemctl start fail2ban
-```
-
-### 6. Run Setup as Deploy User
-
-```bash
-# Login as deploy user
-ssh deploy@your-droplet-ip
-
-# Clone and setup
-sudo git clone https://github.com/chaicode/codebox.git /opt/codebox
-sudo chown -R deploy:deploy /opt/codebox
-cd /opt/codebox
-
-# Run production setup
-# With a domain (HTTPS):
-./scripts/setup-production.sh api.yourdomain.com
-
-# Or without one (plain HTTP on this server's IP):
-./scripts/setup-production.sh
-```
-
-### Quick Security Checklist
-
-- [ ] Non-root user created (`deploy`)
-- [ ] SSH key authentication only
-- [ ] Root login disabled
-- [ ] Password login disabled
-- [ ] Firewall enabled (UFW)
-- [ ] Fail2Ban installed
-- [ ] Auto-updates enabled
-
----
-
-## Publishing images (maintainers)
-
-`.github/workflows/publish-images.yml` builds and pushes both images to Docker
-Hub on every push to `main`, on every `v*` tag, and on manual dispatch:
-
-| Image | From |
-|-------|------|
-| `hiteshchoudhary/codebox-api` | `docker/api/Dockerfile` |
-| `hiteshchoudhary/codebox-worker` | `docker/worker/Dockerfile` |
-
-Tags pushed: `latest` (main), the git tag (`v1.2.3`), and the short SHA.
-
-**One-time setup.** Add two repository secrets under
-*Settings → Secrets and variables → Actions*:
-
-| Secret | Value |
-|--------|-------|
-| `DOCKERHUB_USERNAME` | your Docker Hub username |
-| `DOCKERHUB_TOKEN` | an access token from [hub.docker.com/settings/security](https://hub.docker.com/settings/security), scope **Read & Write** — a token, not your password |
-
-Both repositories must exist on Docker Hub (or the account must allow
-auto-creation) before the first push.
-
-Images are built for **linux/amd64 only**. `docker/worker/Dockerfile` hardcodes
-`x86_64-linux-gnu` and `java-17-openjdk-amd64`, and every mainstream VPS is
-amd64 — but this means the published images will not run on an ARM server or
-an Apple Silicon Mac.
-
----
-
-## API Reference
-
-### Submissions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/submissions` | Create submission (async) |
-| `POST` | `/submissions?wait=true` | Create and wait for result |
-| `GET` | `/submissions/:token` | Get result by token |
-| `POST` | `/submissions/batch` | Submit multiple (up to 20) |
-| `GET` | `/submissions/batch?tokens=a,b,c` | Get multiple results |
-
-### System
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check |
-| `GET` | `/languages` | List supported languages |
-| `GET` | `/statuses` | List status codes |
-| `GET` | `/executor` | Show executor info |
-| `GET` | `/metrics` | Prometheus metrics |
+### 3. Batch Submissions
+- `POST /submissions/batch`: Run up to 20 single-file submissions in parallel.
+- `POST /submissions/multi/batch`: Run up to 20 multi-file submissions in parallel.
+- `GET /submissions/batch?tokens=token1,token2`: Retrieve results for multiple submissions.
 
 ---
 
 ## Supported Languages
 
-| ID | Language | Image |
-|----|----------|-------|
-| 50 | C (GCC 9) | `codebox/gcc:9` |
-| 54 | C++ (GCC 9) | `codebox/gcc:9` |
-| 62 | Java (OpenJDK 17) | `codebox/java:17` |
-| 63 | JavaScript (Node 18) | `codebox/node:18` |
-| 71 | Python (3.8) | `codebox/python:3.8` |
+| ID | Language | Standard Compiler / Interpreter | Command |
+|---|---|---|---|
+| **1** | C | GCC 9.4.0 | `gcc -O2 -std=c11 -o main *.c` |
+| **2** | C++ | GCC 9.4.0 | `g++ -O2 -std=c++17 -I/usr/local/include -o main *.cpp` |
+| **3** | Java | OpenJDK 17 | `javac -cp . Main.java` $\rightarrow$ `java -cp . Main` |
+| **4** | JavaScript | Node.js 18.15.0 | `node main.js` |
+| **5** | Python | Python 3.8.10 | `python3 main.py` |
+| **6** | TypeScript | TypeScript 5.0.3 | `tsc main.ts --outDir .` $\rightarrow$ `node main.js` |
 
 ---
 
-## Status Codes
+## Execution Status Codes
 
-| ID | Description |
-|----|-------------|
-| 1 | In Queue |
-| 2 | Processing |
-| 3 | Accepted |
-| 4 | Wrong Answer |
-| 5 | Time Limit Exceeded |
-| 6 | Compilation Error |
-| 7-12 | Runtime Errors |
-| 13 | Internal Error |
+| ID | Status Description | Notes |
+|---|---|---|
+| **1** | In Queue | Waiting in Redis / BullMQ |
+| **2** | Processing | Actively executing inside sandbox |
+| **3** | Accepted | Process finished cleanly (exit code 0) |
+| **5** | Time Limit Exceeded | Exceeded CPU or wall time limit |
+| **6** | Compilation Error | Compilation failed (check `compile_output`) |
+| **7** | Runtime Error (SIGSEGV) | Segmentation fault |
+| **8** | Runtime Error (SIGXFSZ) | File size limit exceeded |
+| **9** | Runtime Error (SIGFPE) | Floating point exception / division by zero |
+| **10** | Runtime Error (SIGABRT) | Process aborted |
+| **11** | Runtime Error (NZEC) | Non-zero exit code |
+| **13** | Internal Error | Infrastructure or sandbox initialization failure |
 
 ---
 
-## Important URLs
+## Production Deployment
 
-### Local Development
+A production `docker-compose.prod.yml` configuration is provided with resource constraints, automatic TLS via Caddy, and Prometheus metrics protection:
 
-| Service | URL |
-|---------|-----|
-| API | http://localhost:3000 |
-| Health Check | http://localhost:3000/health |
-| Metrics | http://localhost:3000/metrics |
-
-### Production
-
-| Service | URL (mode 2, no domain) | URL (mode 3, with domain) |
-|---------|-------------------------|---------------------------|
-| API | http://\<server-ip\> | https://your-domain.com |
-| Health Check | http://\<server-ip\>/health | https://your-domain.com/health |
-| Prometheus | http://localhost:9090 (SSH tunnel) | same |
-| Grafana | http://localhost:3001 (SSH tunnel) | same |
-
-Prometheus and Grafana are never published to the internet in either mode —
-reach them through an SSH tunnel.
-
-**Access Grafana via SSH tunnel:**
 ```bash
-ssh -L 3001:localhost:3001 user@your-server
-# Then open http://localhost:3001
+# Set secure secrets
+export AUTH_TOKEN=$(openssl rand -hex 32)
+export METRICS_TOKEN=$(openssl rand -hex 16)
+export DOMAIN=codebox.yourdomain.com
+
+docker compose -f docker-compose.prod.yml up -d
 ```
-
----
-
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUTH_TOKEN` | - | **Required.** API authentication token. Compose refuses to start without it. |
-| `DOMAIN` | blank | Blank = plain HTTP on the server IP. Set = automatic HTTPS for that domain. |
-| `EXECUTOR_TYPE` | `auto` | `auto`, `isolate`, `docker`, or `firecracker` |
-| `WORKER_CONCURRENCY` | `4` (dev) / `2` (prod) | Parallel executions per worker |
-| `WORKER_CPUS` | `1.5` | Must not exceed the host's vCPU count |
-| `WORKER_MEMORY` | `4G` | Worker container memory limit |
-| `DEFAULT_CPU_TIME_LIMIT` | `5` | Seconds |
-| `DEFAULT_MEMORY_LIMIT` | `128000` | KB |
-
-See `.env.example` for all options.
-
----
-
-## Security
-
-- **Sandboxed Execution** - Each submission runs in isolation
-- **Network Disabled** - No internet access from user code
-- **Resource Limits** - CPU, memory, and process limits
-- **Time Limits** - Prevents infinite loops
-- **Non-root** - Code runs as unprivileged user
-
----
-
-## Project Structure
-
-```
-codebox/
-├── src/
-│   ├── api/           # Express routes & middleware
-│   ├── executor/      # Docker & Firecracker executors
-│   ├── queue/         # BullMQ job processing
-│   ├── languages/     # Language configurations
-│   └── utils/         # Config, logger, helpers
-├── docker/
-│   └── images/        # Language runtime Dockerfiles
-├── scripts/
-│   ├── setup.sh                # Local setup
-│   ├── setup-production.sh     # Production setup
-│   └── build-images.sh         # Build Docker images
-├── docker-compose.yml          # Local development
-├── docker-compose.prod.yml     # Production with Caddy
-└── Caddyfile                   # Auto-SSL config
-```
-
----
-
-## Postman Collections
-
-Import these into Postman for testing:
-
-- `postman_collection.json` - Basic API tests
-- `postman_leetcode_tests.json` - LeetCode-style test cases
-
----
-
-## Contributing
-
-We welcome contributions! Please check out the [ChaiCode GitHub](https://github.com/chaicode) for guidelines.
 
 ---
 
 ## License
 
-MIT
-
----
-
-<p align="center">
-  <b>Built with ☕ by <a href="https://chaicode.com">ChaiCode</a></b><br>
-  <i>Home for Programmers</i>
-</p>
+MIT License. See [LICENSE](LICENSE) for details.

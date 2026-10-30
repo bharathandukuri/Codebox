@@ -1,7 +1,7 @@
 {
   "name": "code-box",
   "version": "1.0.0",
-  "description": "Judge0-compatible code execution engine",
+  "description": "High-performance sandboxed code execution engine",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -13,9 +13,9 @@
   },
   "keywords": [
     "code-execution",
-    "judge0",
     "sandbox",
-    "docker"
+    "docker",
+    "isolate"
   ],
   "author": "",
   "license": "MIT",
