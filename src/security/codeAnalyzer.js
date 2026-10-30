@@ -90,6 +90,14 @@ const JS_PATTERNS = [
   { pattern: /from\s+['"]net['"]/, reason: 'net module' },
 ];
 
+// ── SQL / SQLite patterns (language ID 7) ──────────────────────────────────
+const SQL_PATTERNS = [
+  { pattern: /\.shell\b/i, reason: 'sqlite shell escape' },
+  { pattern: /\.system\b/i, reason: 'sqlite system command' },
+  { pattern: /\.load\b/i, reason: 'sqlite load extension' },
+  { pattern: /ATTACH\s+DATABASE/i, reason: 'sqlite attach database' },
+];
+
 // ── Map language IDs to their pattern sets ───────────────────────────────────
 const LANGUAGE_PATTERNS = {
   1: C_CPP_PATTERNS,    // C
@@ -98,6 +106,7 @@ const LANGUAGE_PATTERNS = {
   4: JS_PATTERNS,       // JavaScript
   5: PYTHON_PATTERNS,   // Python
   6: JS_PATTERNS,       // TypeScript
+  7: SQL_PATTERNS,      // SQL (SQLite 3)
 };
 
 /**

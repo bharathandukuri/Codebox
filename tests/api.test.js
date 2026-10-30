@@ -27,8 +27,9 @@ describe('CodeBox API', () => {
 
       assert.strictEqual(res.status, 200);
       assert(Array.isArray(data));
-      assert.strictEqual(data.length, 6);
+      assert.strictEqual(data.length, 7);
       assert(data.some(l => l.id === 5)); // Python (ID 5)
+      assert(data.some(l => l.id === 7)); // SQLite (ID 7)
     });
 
     it('should get language by ID', async () => {
@@ -257,6 +258,74 @@ describe('CodeBox API', () => {
       assert.strictEqual(data.length, 2);
       assert(data[0].token);
       assert(data[1].token);
+    });
+  });
+
+  describe('SQLite Execution (Language ID: 7)', () => {
+    it('should execute single-file SQLite query', async () => {
+      const sql = "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO items (name) VALUES ('apple'), ('banana'); SELECT * FROM items;";
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: sql,
+          language_id: 7,
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('apple'));
+      assert(data.stdout.includes('banana'));
+    });
+
+    it('should execute multi-file SQLite project with state persistence across executions', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 7,
+          files: [
+            {
+              path: 'schema.sql',
+              content: "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);\nINSERT INTO users (email) VALUES ('alice@example.com');",
+            },
+            {
+              path: 'query.sql',
+              content: 'SELECT * FROM users;',
+            },
+          ],
+          executions: [
+            { entryPoint: 'schema.sql' },
+            { entryPoint: 'query.sql' },
+          ],
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert.strictEqual(data.executions.length, 2);
+      assert.strictEqual(data.executions[0].status.id, 3);
+      assert.strictEqual(data.executions[1].status.id, 3);
+      assert(data.executions[1].stdout.includes('alice@example.com'));
+    });
+
+    it('should reject dangerous SQLite statements', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: '.shell whoami',
+          language_id: 7,
+        }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json();
+      assert.strictEqual(data.status.id, 6);
+      assert(data.compile_output.includes('Rejected'));
     });
   });
 

@@ -561,6 +561,9 @@ class DockerExecutor {
           // TypeScript (compiled to .js)
           const jsFile = entryPoint.replace(/\.ts$/, '.js');
           runCmd = `node '${jsFile}' ${argsStr}`.trim();
+        } else if (language.id === 7) {
+          // SQLite
+          runCmd = `sqlite3 -header -column /box/db.sqlite < '${entryPoint}'`.trim();
         } else {
           runCmd = `${language.run_cmd} ${argsStr}`.trim();
         }

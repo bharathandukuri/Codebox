@@ -214,6 +214,7 @@ curl -X POST "http://localhost:3000/submissions/multi?wait=true" \
 | **4** | JavaScript | Node.js 18.15.0 | `node main.js` |
 | **5** | Python | Python 3.8.10 | `python3 main.py` |
 | **6** | TypeScript | TypeScript 5.0.3 | `tsc main.ts --outDir .` $\rightarrow$ `node main.js` |
+| **7** | SQL (SQLite 3) | SQLite 3 | `sqlite3 -header -column /box/db.sqlite < query.sql` |
 
 ---
 

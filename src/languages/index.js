@@ -4,10 +4,11 @@ import cpp from './cpp.js';
 import c from './c.js';
 import java from './java.js';
 import typescript from './typescript.js';
+import sqlite from './sqlite.js';
 
 // Map of all supported languages by ID
 const languagesById = new Map();
-const languagesList = [c, cpp, java, javascript, python, typescript];
+const languagesList = [c, cpp, java, javascript, python, typescript, sqlite];
 
 languagesList.forEach(lang => {
   languagesById.set(lang.id, lang);

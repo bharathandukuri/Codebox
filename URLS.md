@@ -29,7 +29,7 @@ GET  /executor      - Sandbox executor info
 ```
 GET  /languages      - List active supported languages
 GET  /languages/all  - List all language profiles
-GET  /languages/:id  - Get configuration for specific language ID (1-6)
+GET  /languages/:id  - Get configuration for specific language ID (1-7)
 GET  /statuses       - List all execution status codes
 ```
 
@@ -97,6 +97,41 @@ curl -X POST "http://localhost:3000/submissions/multi?wait=true" \
     ],
     "executions": [
       { "entryPoint": "Main.java" }
+    ]
+  }'
+```
+
+### 6. Run Single-File SQLite Query (Language ID: 7)
+```bash
+curl -X POST "http://localhost:3000/submissions?wait=true" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: dev-token" \
+  -d '{
+    "source_code": "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO users (name) VALUES (\x27Alice\x27), (\x27Bob\x27); SELECT * FROM users;",
+    "language_id": 7
+  }'
+```
+
+### 7. Run Multi-File SQLite Project (Language ID: 7)
+```bash
+curl -X POST "http://localhost:3000/submissions/multi?wait=true" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: dev-token" \
+  -d '{
+    "language_id": 7,
+    "files": [
+      {
+        "path": "schema.sql",
+        "content": "CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT, salary INT); INSERT INTO employees VALUES (1, \x27John\x27, 50000), (2, \x27Sarah\x27, 65000);"
+      },
+      {
+        "path": "query.sql",
+        "content": "SELECT name, salary FROM employees WHERE salary > 55000;"
+      }
+    ],
+    "executions": [
+      { "entryPoint": "schema.sql" },
+      { "entryPoint": "query.sql" }
     ]
   }'
 ```

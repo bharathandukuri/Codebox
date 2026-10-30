@@ -43,6 +43,7 @@ Deliver a secure, low-latency code execution engine capable of executing arbitra
   - `4`: JavaScript (Node.js 18.15.0)
   - `5`: Python (3.8.10)
   - `6`: TypeScript (5.0.3)
+  - `7`: SQL (SQLite 3)
 
 ---
 

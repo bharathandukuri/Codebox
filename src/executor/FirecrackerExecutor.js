@@ -24,6 +24,7 @@ const IMAGE_TO_ROOTFS = {
   'codebox/gcc:9': 'gcc',
   'codebox/java:17': 'java',
   'codebox/typescript:5': 'typescript',
+  'codebox/sqlite:3': 'sqlite',
   'codebox/multi:latest': 'multi',
 };
 
@@ -453,9 +454,298 @@ class FirecrackerExecutor {
    * Multi-file execution in Firecracker
    */
   async executeMulti(submission) {
-    // Firecracker boots into a single init script.
-    // We delegate to DockerExecutor if available or return not supported.
-    throw new Error('Multi-file execution is supported on Docker and Isolate executors');
+    const { language, executions } = submission;
+    const vmId = uuidv4().slice(0, 8);
+    const socketPath = `${SOCKETS_DIR}/${vmId}.sock`;
+    const rootfsName = IMAGE_TO_ROOTFS[language.image];
+
+    if (!rootfsName) {
+      return {
+        status: getStatusById(13),
+        message: `No rootfs found for image: ${language.image}`,
+        compile: null,
+        executions: [],
+      };
+    }
+
+    let fcProcess = null;
+
+    try {
+      // 1. Create a copy-on-write overlay for the rootfs
+      const overlayPath = await this.createOverlay(vmId, rootfsName);
+
+      // 2. Mount and write all files, stdins, and execution script
+      await this.writeMultiFilesToOverlay(overlayPath, submission);
+
+      // 3. Create Firecracker config with max memory
+      const maxMemory = Math.max(...executions.map(e => e.memory_limit || 256000), 256000);
+      const fcConfig = this.createConfig(vmId, overlayPath, {
+        ...submission,
+        memory_limit: maxMemory,
+      });
+      const configPath = `${SOCKETS_DIR}/${vmId}-config.json`;
+      await fs.writeFile(configPath, JSON.stringify(fcConfig, null, 2));
+
+      // 4. Start Firecracker
+      fcProcess = await this.startFirecracker(vmId, socketPath, configPath);
+
+      // 5. Total wall time limit for all executions + compile
+      const totalWallTime = executions.reduce((sum, e) => sum + (e.wall_time_limit || 5), 10);
+      const executionResult = await this.executeInVm(
+        socketPath,
+        { ...submission, wall_time_limit: totalWallTime },
+        fcProcess
+      );
+
+      // 6. Parse serial console output into compile & execution results
+      return this.parseMultiVmOutput(executionResult.stdout, submission, executionResult);
+    } catch (error) {
+      logger.error({
+        event: 'firecracker_multi_execution_error',
+        token: submission.token,
+        error: error.message,
+      });
+
+      return {
+        status: getStatusById(13),
+        message: error.message,
+        compile: null,
+        executions: [],
+      };
+    } finally {
+      await this.cleanup(vmId, fcProcess);
+    }
+  }
+
+  /**
+   * Mount overlay and write all files, inputs, and the multi execution script
+   */
+  async writeMultiFilesToOverlay(overlayPath, submission) {
+    const { files, executions } = submission;
+    const mountDir = `${SOCKETS_DIR}/mount-${path.basename(overlayPath, '.ext4')}`;
+
+    await fs.mkdir(mountDir, { recursive: true });
+    await this.runCommand('sudo', ['mount', '-o', 'loop', overlayPath, mountDir]);
+
+    try {
+      const boxDir = `${mountDir}/box`;
+
+      // Write all project files
+      for (const file of files) {
+        const filePath = path.join(boxDir, file.path);
+        const fileDir = path.dirname(filePath);
+        await fs.mkdir(fileDir, { recursive: true });
+        await fs.writeFile(filePath, file.content);
+        await this.runCommand('sudo', ['chown', '1001:1001', filePath]);
+      }
+
+      // Write stdin files for each execution
+      for (let i = 0; i < executions.length; i++) {
+        const stdinPath = `${boxDir}/_stdin_${i}.txt`;
+        await fs.writeFile(stdinPath, executions[i].stdin || '');
+        await this.runCommand('sudo', ['chown', '1001:1001', stdinPath]);
+      }
+
+      // Generate multi execution script
+      const script = this.createMultiExecutionScript(submission);
+      const scriptPath = `${boxDir}/_exec.sh`;
+      await fs.writeFile(scriptPath, script);
+      await this.runCommand('sudo', ['chmod', '+x', scriptPath]);
+      await this.runCommand('sudo', ['chown', '1001:1001', scriptPath]);
+    } finally {
+      await this.runCommand('sudo', ['umount', mountDir]);
+      await fs.rmdir(mountDir);
+    }
+  }
+
+  /**
+   * Generate shell script that orchestrates compile and sequential executions inside the VM
+   */
+  createMultiExecutionScript(submission) {
+    const { language, files, executions, compileOrder, compiler_options } = submission;
+
+    let script = '#!/bin/sh\n';
+    script += 'cd /box\n';
+    script += 'exec 2>&1\n\n';
+
+    // Compilation step (if compiled language)
+    if (language.compile_cmd) {
+      let compileFiles = [];
+      if (compileOrder && Array.isArray(compileOrder) && compileOrder.length > 0) {
+        compileFiles = compileOrder;
+      } else {
+        const sourceExts = ['.java', '.cpp', '.c', '.cc', '.cxx', '.ts'];
+        compileFiles = files
+          .map(f => f.path)
+          .filter(p => sourceExts.some(ext => p.endsWith(ext)));
+      }
+
+      let compileCmd = '';
+      if (language.id === 3) {
+        compileCmd = `javac -cp .:/usr/local/lib/java/* ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+      } else if (language.id === 2) {
+        compileCmd = `g++ -O2 -std=c++17 -I/usr/local/include -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+      } else if (language.id === 1) {
+        compileCmd = `gcc -O2 -std=c11 -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+      } else if (language.id === 6) {
+        compileCmd = `tsc ${compileFiles.map(f => `'${f}'`).join(' ')} --outDir . --esModuleInterop --skipLibCheck`;
+      } else {
+        compileCmd = language.compile_cmd;
+      }
+
+      if (compiler_options) {
+        compileCmd += ` ${compiler_options}`;
+      }
+
+      script += 'echo "===CODEBOX_COMPILE_START==="\n';
+      script += `${compileCmd} 2>/box/compile_error.txt\n`;
+      script += 'COMPILE_EXIT=$?\n';
+      script += 'if [ $COMPILE_EXIT -ne 0 ]; then\n';
+      script += '  cat /box/compile_error.txt\n';
+      script += '  echo "===CODEBOX_COMPILE_FAIL==="; sync; exit 100;\n';
+      script += 'fi\n';
+      script += 'echo "===CODEBOX_COMPILE_END==="\n\n';
+    }
+
+    // Executions
+    for (let i = 0; i < executions.length; i++) {
+      const execConfig = executions[i];
+      const { entryPoint, args = [], wall_time_limit = 5 } = execConfig;
+      const argsStr = args.map(a => `'${a}'`).join(' ');
+
+      let runCmd = '';
+      if (language.id === 3) {
+        let className = entryPoint.replace(/\.java$/, '').replace(/\//g, '.');
+        runCmd = `java -cp .:/usr/local/lib/java/* ${className} ${argsStr}`.trim();
+      } else if (language.id === 2 || language.id === 1) {
+        runCmd = `./main ${argsStr}`.trim();
+      } else if (language.id === 5) {
+        runCmd = `python3 '${entryPoint}' ${argsStr}`.trim();
+      } else if (language.id === 4) {
+        runCmd = `node '${entryPoint}' ${argsStr}`.trim();
+      } else if (language.id === 6) {
+        const jsFile = entryPoint.replace(/\.ts$/, '.js');
+        runCmd = `node '${jsFile}' ${argsStr}`.trim();
+      } else if (language.id === 7) {
+        runCmd = `sqlite3 -header -column /box/db.sqlite < '${entryPoint}'`.trim();
+      } else {
+        runCmd = `${language.run_cmd} ${argsStr}`.trim();
+      }
+
+      script += `echo "===CODEBOX_EXEC_${i}_START==="\n`;
+      script += `timeout ${wall_time_limit} ${runCmd} < /box/_stdin_${i}.txt\n`;
+      script += `EXIT_CODE=$?\n`;
+      script += `echo "===CODEBOX_EXEC_${i}_EXIT:$EXIT_CODE==="\n`;
+      script += `if [ $EXIT_CODE -ne 0 ]; then sync; exit 0; fi\n\n`;
+    }
+
+    script += 'sync\n';
+    script += 'exit 0\n';
+
+    return script;
+  }
+
+  /**
+   * Parse console output into structured multi-file results
+   */
+  parseMultiVmOutput(output, submission, rawResult) {
+    const { executions } = submission;
+    const text = output || '';
+
+    // Check compilation
+    let compileResultSummary = null;
+    if (submission.language.compile_cmd) {
+      if (text.includes('===CODEBOX_COMPILE_FAIL===') || rawResult.exitCode === 100) {
+        const compileOut = text.split('===CODEBOX_COMPILE_START===')[1]?.split('===CODEBOX_COMPILE_FAIL===')[0]?.trim() || 'Compilation failed';
+        return {
+          status: getStatusById(6),
+          compile: {
+            status: getStatusById(6),
+            output: compileOut,
+            time: null,
+            wall_time: null,
+          },
+          executions: executions.map(e => ({
+            entryPoint: e.entryPoint,
+            status: getStatusById(6),
+            stdout: null,
+            stderr: null,
+            exit_code: null,
+            exit_signal: null,
+            time: null,
+            wall_time: null,
+            memory: null,
+          })),
+        };
+      }
+
+      compileResultSummary = {
+        status: getStatusById(3),
+        output: null,
+        time: null,
+        wall_time: null,
+      };
+    }
+
+    // Parse each execution
+    const executionResults = [];
+    let overallStatus = getStatusById(3);
+
+    for (let i = 0; i < executions.length; i++) {
+      const entryPoint = executions[i].entryPoint;
+      const startMarker = `===CODEBOX_EXEC_${i}_START===`;
+      const exitMarkerPrefix = `===CODEBOX_EXEC_${i}_EXIT:`;
+
+      if (!text.includes(startMarker)) {
+        // Aborted due to previous failure
+        executionResults.push({
+          entryPoint,
+          status: getStatusById(12),
+          stdout: null,
+          stderr: null,
+          exit_code: null,
+          exit_signal: null,
+          time: null,
+          wall_time: null,
+          memory: null,
+        });
+        continue;
+      }
+
+      const parts = text.split(startMarker)[1];
+      const execOutput = parts.split('===CODEBOX_EXEC_')[0].trim();
+      const exitParts = parts.split(exitMarkerPrefix);
+      const exitCode = exitParts.length > 1 ? parseInt(exitParts[1].split('===')[0], 10) : 0;
+
+      let status = getStatusById(3);
+      if (exitCode === 124) {
+        status = getStatusById(5); // TLE
+      } else if (exitCode !== 0) {
+        status = getStatusById(11); // NZEC
+      }
+
+      executionResults.push({
+        entryPoint,
+        status,
+        stdout: execOutput || null,
+        stderr: null,
+        exit_code: exitCode,
+        exit_signal: null,
+        time: null,
+        wall_time: null,
+        memory: null,
+      });
+
+      if (status.id !== 3) {
+        overallStatus = status;
+      }
+    }
+
+    return {
+      status: overallStatus,
+      compile: compileResultSummary,
+      executions: executionResults,
+    };
   }
 }
 

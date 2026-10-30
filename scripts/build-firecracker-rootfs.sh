@@ -81,6 +81,8 @@ build_rootfs "python" "codebox/python:3.8"
 build_rootfs "node" "codebox/node:18"
 build_rootfs "gcc" "codebox/gcc:9"
 build_rootfs "java" "codebox/java:17"
+build_rootfs "typescript" "codebox/typescript:5"
+build_rootfs "sqlite" "codebox/sqlite:3"
 
 echo ""
 echo -e "${GREEN}All rootfs images built successfully!${NC}"
