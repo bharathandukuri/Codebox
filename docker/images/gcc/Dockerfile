@@ -7,11 +7,12 @@ RUN useradd -m -u 1001 -s /bin/bash runner
 RUN mkdir -p /box && chown runner:runner /box
 
 # Install additional tools.
-# gcc:9 is built on Debian 11 (bullseye), which reached end-of-life — its
-# security repo now serves an expired Release file and plain `apt-get update`
-# exits 100, breaking ./scripts/build-images.sh. Accept the expired metadata;
-# the packages themselves are still served and signature checking stays on.
-RUN apt-get -o Acquire::Check-Valid-Until=false update \
+# gcc:9 is based on Debian Bullseye. Debian moved bullseye and bullseye-security
+# package updates to archive.debian.org, so deb.debian.org returns 404 for updates.
+RUN sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list \
+    && sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list \
+    && sed -i '/bullseye-updates/d' /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
     time \
     unzip \
