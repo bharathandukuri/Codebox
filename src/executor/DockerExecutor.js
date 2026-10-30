@@ -249,7 +249,13 @@ class DockerExecutor {
   async writeFileToBox(container, fileName, content) {
     const contentBuffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
 
-    // File names come from the language config, never from user input.
+    // Ensure parent directory exists inside /box if fileName contains subdirectories
+    const lastSlash = fileName.lastIndexOf('/');
+    if (lastSlash !== -1) {
+      const dirPath = fileName.substring(0, lastSlash);
+      await this.runCommand(container, `mkdir -p '/box/${dirPath}'`, null, 10, '');
+    }
+
     const result = await this.runCommand(
       container,
       `base64 -d > '/box/${fileName}'`,
@@ -427,6 +433,193 @@ class DockerExecutor {
         });
       });
     });
+  }
+  /**
+   * Execute a multi-file submission in a single sandbox
+   * @param {object} submission - The multi-file submission
+   * @returns {object} Multi-file execution result
+   */
+  async executeMulti(submission) {
+    const { language, files, executions, compileOrder, compiler_options } = submission;
+    let container = null;
+
+    try {
+      // 1. Create and start a single container for the entire lifecycle
+      // Pass the language and limits of the first execution / overall submission
+      const baseLimits = executions[0] || {};
+      const containerSubmission = {
+        language,
+        memory_limit: Math.max(...executions.map(e => e.memory_limit || 256000), 256000),
+        max_processes_and_or_threads: Math.max(...executions.map(e => e.max_processes_and_or_threads || 64), 64),
+        enable_network: submission.enable_network || false,
+      };
+
+      container = await this.createContainer(containerSubmission);
+      await container.start();
+
+      // 2. Write all files to /box
+      for (const file of files) {
+        await this.writeFileToBox(container, file.path, file.content);
+      }
+
+      // 3. Optional compilation step if the language requires it
+      let compileResultSummary = null;
+      if (language.compile_cmd) {
+        // Determine compile file order
+        let compileFiles = [];
+        if (compileOrder && Array.isArray(compileOrder) && compileOrder.length > 0) {
+          compileFiles = compileOrder;
+        } else {
+          // Use files array preserving order, filtered by relevant source extensions
+          const sourceExts = ['.java', '.cpp', '.c', '.cc', '.cxx', '.ts'];
+          compileFiles = files
+            .map(f => f.path)
+            .filter(p => sourceExts.some(ext => p.endsWith(ext)));
+        }
+
+        let compileCmd = '';
+        if (language.id === 3) {
+          // Java
+          compileCmd = `javac -cp .:/usr/local/lib/java/* ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 2) {
+          // C++
+          compileCmd = `g++ -O2 -std=c++17 -I/usr/local/include -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 1) {
+          // C
+          compileCmd = `gcc -O2 -std=c11 -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 6) {
+          // TypeScript
+          compileCmd = `tsc ${compileFiles.map(f => `'${f}'`).join(' ')} --outDir . --esModuleInterop --skipLibCheck`;
+        } else {
+          compileCmd = language.compile_cmd;
+        }
+
+        if (compiler_options) {
+          compileCmd += ` ${compiler_options}`;
+        }
+
+        const maxCompileTime = Math.max(...executions.map(e => (e.cpu_time_limit || 5) + (e.cpu_extra_time || 1)));
+        const compileRes = await this.runCommand(container, compileCmd, null, maxCompileTime, '');
+
+        if (compileRes.exitCode !== 0) {
+          // Compilation failed - short-circuit immediately
+          return {
+            status: getStatusById(6), // Compilation Error
+            compile: {
+              status: getStatusById(6),
+              output: compileRes.stderr || compileRes.stdout,
+              time: compileRes.time,
+              wall_time: compileRes.wallTime,
+            },
+            executions: executions.map(e => ({
+              entryPoint: e.entryPoint,
+              status: getStatusById(6),
+              stdout: null,
+              stderr: null,
+              exit_code: null,
+              exit_signal: null,
+              time: null,
+              wall_time: null,
+              memory: null,
+            })),
+          };
+        }
+
+        compileResultSummary = {
+          status: getStatusById(3), // Accepted
+          output: compileRes.stdout || null,
+          time: compileRes.time,
+          wall_time: compileRes.wallTime,
+        };
+      }
+
+      // 4. Run each execution sequentially in the same sandbox
+      const executionResults = [];
+      let overallStatus = getStatusById(3); // Default Accepted
+
+      for (const execConfig of executions) {
+        const { entryPoint, stdin = '', args = [], wall_time_limit = 5 } = execConfig;
+
+        // Build execution command for entryPoint
+        let runCmd = '';
+        const argsStr = args.map(a => `'${a}'`).join(' ');
+
+        if (language.id === 3) {
+          // Java: entryPoint could be "Main.java" or "Main" or "pkg/Main.java"
+          let className = entryPoint.replace(/\.java$/, '').replace(/\//g, '.');
+          runCmd = `java -cp .:/usr/local/lib/java/* ${className} ${argsStr}`.trim();
+        } else if (language.id === 2 || language.id === 1) {
+          // C / C++: compiled binary is ./main
+          runCmd = `./main ${argsStr}`.trim();
+        } else if (language.id === 5) {
+          // Python
+          runCmd = `python3 '${entryPoint}' ${argsStr}`.trim();
+        } else if (language.id === 4) {
+          // JavaScript
+          runCmd = `node '${entryPoint}' ${argsStr}`.trim();
+        } else if (language.id === 6) {
+          // TypeScript (compiled to .js)
+          const jsFile = entryPoint.replace(/\.ts$/, '.js');
+          runCmd = `node '${jsFile}' ${argsStr}`.trim();
+        } else {
+          runCmd = `${language.run_cmd} ${argsStr}`.trim();
+        }
+
+        const runResult = await this.runCommand(container, runCmd, null, wall_time_limit, stdin);
+        const parsed = this.resultParser.parse(runResult, {
+          redirect_stderr_to_stdout: submission.redirect_stderr_to_stdout,
+        });
+
+        const executionItem = {
+          entryPoint,
+          status: parsed.status,
+          stdout: parsed.stdout,
+          stderr: parsed.stderr,
+          exit_code: parsed.exit_code,
+          exit_signal: parsed.exit_signal,
+          time: parsed.time,
+          wall_time: parsed.wall_time,
+          memory: parsed.memory,
+        };
+
+        executionResults.push(executionItem);
+
+        // Per requirement: If an execution times out or crashes fatally (non-zero or timed out),
+        // kill container and fail the remaining executions
+        if (runResult.timedOut || parsed.status.id !== 3) {
+          overallStatus = parsed.status;
+          break;
+        }
+      }
+
+      return {
+        status: overallStatus,
+        compile: compileResultSummary,
+        executions: executionResults,
+      };
+    } catch (error) {
+      logger.error({
+        event: 'multi_execution_docker_error',
+        token: submission.token,
+        error: error.message,
+      });
+
+      return {
+        status: getStatusById(13), // Internal Error
+        message: error.message,
+        compile: null,
+        executions: [],
+      };
+    } finally {
+      if (container) {
+        try {
+          await container.stop({ t: 1 }).catch(() => {});
+          await container.remove({ force: true }).catch(() => {});
+        } catch (err) {
+          logger.warn({ err }, 'Failed to cleanup multi-file container');
+        }
+      }
+    }
   }
 }
 

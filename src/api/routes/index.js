@@ -6,8 +6,11 @@ import metricsRouter from './metrics.js';
 
 const router = Router();
 
-// Submissions endpoints
+// Submissions endpoints (primary)
 router.use('/submissions', submissionsRouter);
+
+// Run alias
+router.use('/run', submissionsRouter);
 
 // Languages endpoint
 router.use('/languages', languagesRouter);

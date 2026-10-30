@@ -83,17 +83,4 @@ export async function executeCode(submission) {
   }
 }
 
-/**
- * Compare output with expected output
- */
-export function compareOutput(actual, expected) {
-  if (!expected) return null;
-
-  // Normalize outputs (trim trailing whitespace/newlines)
-  const normalizedActual = (actual || '').trim();
-  const normalizedExpected = expected.trim();
-
-  return normalizedActual === normalizedExpected;
-}
-
 export default executeCode;

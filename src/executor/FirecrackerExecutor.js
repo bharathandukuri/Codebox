@@ -448,6 +448,15 @@ class FirecrackerExecutor {
       proc.on('error', reject);
     });
   }
+
+  /**
+   * Multi-file execution in Firecracker
+   */
+  async executeMulti(submission) {
+    // Firecracker boots into a single init script.
+    // We delegate to DockerExecutor if available or return not supported.
+    throw new Error('Multi-file execution is supported on Docker and Isolate executors');
+  }
 }
 
 export default FirecrackerExecutor;

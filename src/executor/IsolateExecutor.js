@@ -396,6 +396,185 @@ class IsolateExecutor {
       message: result.message,
     };
   }
+
+  /**
+   * Execute multi-file submission in isolate sandbox
+   */
+  async executeMulti(submission) {
+    const boxId = allocateBoxId();
+    const { language, files, executions, compileOrder, compiler_options } = submission;
+    let boxDir = null;
+
+    try {
+      const { stdout: initOut } = await execFileAsync('isolate', [
+        '--init', `--box-id=${boxId}`, '--cg',
+      ]);
+      boxDir = initOut.trim();
+      const workDir = path.join(boxDir, 'box');
+
+      // Write all files into workDir
+      for (const file of files) {
+        const filePath = path.join(workDir, file.path);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, file.content);
+      }
+
+      let compileResultSummary = null;
+      if (language.compile_cmd) {
+        let compileFiles = [];
+        if (compileOrder && Array.isArray(compileOrder) && compileOrder.length > 0) {
+          compileFiles = compileOrder;
+        } else {
+          const sourceExts = ['.java', '.cpp', '.c', '.cc', '.cxx', '.ts'];
+          compileFiles = files
+            .map(f => f.path)
+            .filter(p => sourceExts.some(ext => p.endsWith(ext)));
+        }
+
+        let compileCmd = '';
+        if (language.id === 3) {
+          compileCmd = `javac -cp .:/usr/local/lib/java/* ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 2) {
+          compileCmd = `g++ -O2 -std=c++17 -I/usr/local/include -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 1) {
+          compileCmd = `gcc -O2 -std=c11 -o main ${compileFiles.map(f => `'${f}'`).join(' ')}`;
+        } else if (language.id === 6) {
+          compileCmd = `tsc ${compileFiles.map(f => `'${f}'`).join(' ')} --outDir . --esModuleInterop --skipLibCheck`;
+        } else {
+          compileCmd = language.compile_cmd;
+        }
+
+        if (compiler_options) {
+          compileCmd += ` ${compiler_options}`;
+        }
+
+        const compileRes = await this.runIsolate(boxId, workDir, {
+          cmd: compileCmd,
+          timeLimit: config.execution.compileCpuTimeLimit,
+          wallTimeLimit: config.execution.compileWallTimeLimit,
+          memoryLimit: Math.max(...executions.map(e => e.memory_limit || 512000), 512000),
+          processes: Math.max(...executions.map(e => e.max_processes_and_or_threads || 64), 64),
+        });
+
+        if (compileRes.exitCode !== 0 || compileRes.isoStatus) {
+          return {
+            status: getStatusById(6),
+            compile: {
+              status: getStatusById(6),
+              output: compileRes.stderr || compileRes.stdout || compileRes.message,
+              time: compileRes.time != null ? compileRes.time.toFixed(3) : null,
+              wall_time: compileRes.wallTime != null ? compileRes.wallTime.toFixed(3) : null,
+            },
+            executions: executions.map(e => ({
+              entryPoint: e.entryPoint,
+              status: getStatusById(6),
+              stdout: null,
+              stderr: null,
+              exit_code: null,
+              exit_signal: null,
+              time: null,
+              wall_time: null,
+              memory: null,
+            })),
+          };
+        }
+
+        compileResultSummary = {
+          status: getStatusById(3),
+          output: compileRes.stdout || null,
+          time: compileRes.time != null ? compileRes.time.toFixed(3) : null,
+          wall_time: compileRes.wallTime != null ? compileRes.wallTime.toFixed(3) : null,
+        };
+      }
+
+      const executionResults = [];
+      let overallStatus = getStatusById(3);
+
+      for (let i = 0; i < executions.length; i++) {
+        const execConfig = executions[i];
+        const { entryPoint, stdin = '', args = [], wall_time_limit = 5, cpu_time_limit = 5, memory_limit = 256000, max_processes_and_or_threads = 64 } = execConfig;
+
+        const stdinFile = path.join(workDir, `_stdin_${i}.txt`);
+        await fs.writeFile(stdinFile, stdin);
+
+        let runCmd = '';
+        const argsStr = args.map(a => `'${a}'`).join(' ');
+
+        if (language.id === 3) {
+          let className = entryPoint.replace(/\.java$/, '').replace(/\//g, '.');
+          runCmd = `java -cp .:/usr/local/lib/java/* ${className} ${argsStr}`.trim();
+        } else if (language.id === 2 || language.id === 1) {
+          runCmd = `./main ${argsStr}`.trim();
+        } else if (language.id === 5) {
+          runCmd = `python3 '${entryPoint}' ${argsStr}`.trim();
+        } else if (language.id === 4) {
+          runCmd = `node '${entryPoint}' ${argsStr}`.trim();
+        } else if (language.id === 6) {
+          const jsFile = entryPoint.replace(/\.ts$/, '.js');
+          runCmd = `node '${jsFile}' ${argsStr}`.trim();
+        } else {
+          runCmd = `${language.run_cmd} ${argsStr}`.trim();
+        }
+
+        const runResult = await this.runIsolate(boxId, workDir, {
+          cmd: runCmd,
+          stdinFile,
+          timeLimit: cpu_time_limit,
+          wallTimeLimit: wall_time_limit,
+          memoryLimit,
+          processes: max_processes_and_or_threads,
+        });
+
+        const parsed = this.buildResult(runResult, {
+          redirect_stderr_to_stdout: submission.redirect_stderr_to_stdout,
+        });
+
+        executionResults.push({
+          entryPoint,
+          status: parsed.status,
+          stdout: parsed.stdout,
+          stderr: parsed.stderr,
+          exit_code: parsed.exit_code,
+          exit_signal: parsed.exit_signal,
+          time: parsed.time,
+          wall_time: parsed.wall_time,
+          memory: parsed.memory,
+        });
+
+        if (parsed.status.id !== 3) {
+          overallStatus = parsed.status;
+          break;
+        }
+      }
+
+      return {
+        status: overallStatus,
+        compile: compileResultSummary,
+        executions: executionResults,
+      };
+    } catch (error) {
+      logger.error({
+        event: 'multi_execution_isolate_error',
+        token: submission.token,
+        error: error.message,
+      });
+
+      return {
+        status: getStatusById(13),
+        message: error.message,
+        compile: null,
+        executions: [],
+      };
+    } finally {
+      if (boxDir) {
+        try {
+          await execFileAsync('isolate', ['--cleanup', `--box-id=${boxId}`, '--cg']);
+        } catch (err) {
+          logger.warn({ err }, `Failed to cleanup isolate box ${boxId}`);
+        }
+      }
+    }
+  }
 }
 
 export default IsolateExecutor;

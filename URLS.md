@@ -42,14 +42,18 @@ GET  /languages/:id  - Get language by ID
 GET  /statuses       - List all status codes
 ```
 
-### Submissions
+### Submissions (Single & Multi-File)
 ```
-POST   /submissions              - Create submission
-POST   /submissions?wait=true    - Create and wait for result
-GET    /submissions/:token       - Get submission by token
-DELETE /submissions/:token       - Delete submission
-POST   /submissions/batch        - Batch create (up to 20)
-GET    /submissions/batch?tokens=a,b,c - Batch get
+POST   /submissions                    - Create single-file submission
+POST   /submissions?wait=true          - Create and wait for result
+GET    /submissions/:token             - Get submission by token (single or multi-file)
+DELETE /submissions/:token             - Delete submission
+POST   /submissions/batch              - Batch create single-file submissions (up to 20)
+GET    /submissions/batch?tokens=a,b,c - Batch get submissions
+
+POST   /submissions/multi              - Create multi-file submission
+POST   /submissions/multi?wait=true    - Create multi-file submission & wait for result
+POST   /submissions/multi/batch        - Batch create multi-file submissions (up to 20)
 ```
 
 ---
@@ -67,17 +71,38 @@ curl http://localhost:3000/languages \
   -H "X-Auth-Token: dev-token"
 ```
 
-### Run Python Code
+### Run Python Code (Language ID: 5)
 ```bash
 curl -X POST "http://localhost:3000/submissions?wait=true" \
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: dev-token" \
-  -d '{"source_code": "print(1+1)", "language_id": 71}'
+  -d '{"source_code": "print(1+1)", "language_id": 5}'
 ```
 
-### Run JavaScript Code
+### Run JavaScript Code (Language ID: 4)
 ```bash
 curl -X POST "http://localhost:3000/submissions?wait=true" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: dev-token" \
+  -d '{"source_code": "console.log(1+1)", "language_id": 4}'
+```
+
+### Run Multi-File Submission
+```bash
+curl -X POST "http://localhost:3000/submissions/multi?wait=true" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: dev-token" \
+  -d '{
+    "language_id": 5,
+    "files": [
+      {"path": "helper.py", "content": "def add(a, b): return a + b"},
+      {"path": "main.py", "content": "from helper import add\nprint(add(2, 3))"}
+    ],
+    "executions": [
+      {"entryPoint": "main.py"}
+    ]
+  }'
+```
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: dev-token" \
   -d '{"source_code": "console.log(2+2)", "language_id": 63}'

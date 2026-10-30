@@ -2,7 +2,8 @@ import { Worker } from 'bullmq';
 import Redis from 'ioredis';
 import config from '../utils/config.js';
 import logger from '../utils/logger.js';
-import { executeCode, compareOutput } from './jobs/executeCode.js';
+import { executeCode } from './jobs/executeCode.js';
+import { executeMultiCode } from './jobs/executeMultiCode.js';
 import { getStatusById } from '../languages/index.js';
 
 let redis = null;
@@ -67,15 +68,12 @@ async function processJob(job) {
     status: getStatusById(2), // Processing
   });
 
-  // Execute the code
-  let result = await executeCode(submission);
-
-  // Check expected output if provided
-  if (submission.expected_output && result.status.id === 3) {
-    const matches = compareOutput(result.stdout, submission.expected_output);
-    if (matches === false) {
-      result.status = getStatusById(4); // Wrong Answer
-    }
+  // Execute the code (dispatch based on submission.type)
+  let result;
+  if (submission.type === 'multi') {
+    result = await executeMultiCode(submission);
+  } else {
+    result = await executeCode(submission);
   }
 
   // Store final result

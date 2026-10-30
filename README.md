@@ -1,23 +1,35 @@
-# CodeBox | ChaiCode
+# CodeBox
 
-**A blazing-fast, Judge0-compatible code execution engine built for the ChaiCode platform.**
+**A blazing-fast, sandboxed code execution engine customized with custom multi-file orchestration and pure execution semantics.**
 
-> Part of the [ChaiCode](https://chaicode.com) ecosystem - Home for Programmers
+> Originally developed as part of the [ChaiCode](https://chaicode.com) / Chai aur Code ecosystem. Special thanks and credits to **Chai aur Code** & **Hitesh Choudhary** for the foundational architecture.
 
 ---
 
 ## What is CodeBox?
 
-CodeBox is a self-hosted code execution service that powers the coding challenges and practice problems on ChaiCode. It securely runs user-submitted code in isolated environments and returns the results - just like LeetCode or HackerRank.
+CodeBox is a high-performance code execution service designed for running user-submitted code in securely isolated environments. Unlike standard evaluation systems, this edition focuses strictly on **pure execution** (compilation, standard I/O piping, resource telemetry, and sandbox management), decoupling code execution from test grading.
 
-### Key Features
+### Key Features & Custom Improvements
 
-- **Judge0 API Compatible** - Drop-in replacement, works with existing integrations
-- **Dual Execution Engines** - Firecracker microVMs (125ms) or Docker containers (500ms)
-- **Auto-Detection** - Automatically picks the fastest available executor
-- **5 Languages** - Python, JavaScript, C, C++, Java (easily extensible)
-- **Batch Submissions** - Run multiple test cases in one request
-- **Production Ready** - Redis queue, Prometheus metrics, auto-SSL with Caddy
+- **Pure Execution Engine** - Focuses strictly on executing code and returning stdout, stderr, execution time, peak memory, and exit codes without forced string comparison or grading.
+- **Native Multi-File Submissions (`POST /submissions/multi`)** - Send multiple files as structured JSON (no zip/base64 required), compile once, and execute multiple entry points sequentially inside a single shared sandbox.
+- **Sequential Language IDs** - Simplified clean IDs:
+  - `1`: C (GCC 9.4.0)
+  - `2`: C++ (GCC 9.4.0)
+  - `3`: Java (OpenJDK 17)
+  - `4`: JavaScript (Node.js 18.15.0)
+  - `5`: Python (3.8.10)
+  - `6`: TypeScript (5.0.3)
+- **Dual / Tri-Execution Engines** - Isolate (cgroups v2 namespaces), Firecracker microVMs, and Docker containers with auto-detection.
+- **Batch Submissions** - Run multiple test cases in a single request for both single-file and multi-file codebases.
+- **Production Ready** - Redis queue, Prometheus metrics, and reverse proxy support.
+
+---
+
+## Credits & Acknowledgements
+
+This project builds upon the original CodeBox engine created by **Hitesh Choudhary** and the **Chai aur Code** team. We extend our gratitude to Chai aur Code for the open-source base. These updates introduce custom architectural improvements including pure execution semantics, native multi-file JSON schemas, and refactored language configurations.
 
 ---
 
@@ -93,7 +105,7 @@ The dev stack ships with the token `dev-token` already set:
 curl -X POST "http://localhost:3000/submissions?wait=true" \
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: dev-token" \
-  -d '{"source_code": "print(\"Chai aur Code!\")", "language_id": 71}'
+  -d '{"source_code": "print(\"Chai aur Code!\")", "language_id": 5}'
 ```
 
 The API is on port 3000 directly — Caddy is not involved in this mode.

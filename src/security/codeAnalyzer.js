@@ -7,8 +7,6 @@
  * via obfuscation, but it catches low-effort attacks and saves resources.
  */
 
-const MULTI_FILE_LANGUAGE_ID = 89;
-
 // ── Sensitive file paths (all languages) ────────────────────────────────────
 const SENSITIVE_PATHS = [
   /\/etc\/passwd/,
@@ -94,12 +92,12 @@ const JS_PATTERNS = [
 
 // ── Map language IDs to their pattern sets ───────────────────────────────────
 const LANGUAGE_PATTERNS = {
-  50: C_CPP_PATTERNS,   // C
-  54: C_CPP_PATTERNS,   // C++
-  62: JAVA_PATTERNS,    // Java
-  71: PYTHON_PATTERNS,  // Python
-  63: JS_PATTERNS,      // JavaScript
-  74: JS_PATTERNS,      // TypeScript
+  1: C_CPP_PATTERNS,    // C
+  2: C_CPP_PATTERNS,    // C++
+  3: JAVA_PATTERNS,     // Java
+  4: JS_PATTERNS,       // JavaScript
+  5: PYTHON_PATTERNS,   // Python
+  6: JS_PATTERNS,       // TypeScript
 };
 
 /**
@@ -110,8 +108,7 @@ const LANGUAGE_PATTERNS = {
  * @returns {{ rejected: boolean, reason: string|null }}
  */
 export function analyzeCode(sourceCode, languageId) {
-  // Skip analysis for multi-file programs (can't scan ZIP here)
-  if (!sourceCode || languageId === MULTI_FILE_LANGUAGE_ID) {
+  if (!sourceCode) {
     return { rejected: false, reason: null };
   }
 

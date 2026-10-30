@@ -1,18 +1,22 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { validateSubmission, validateBatchSubmission, sanitizeCompilerOptions, sanitizeCommandLineArgs } from '../middleware/validation.js';
+import {
+  validateSubmission,
+  validateBatchSubmission,
+  validateMultiSubmission,
+  validateBatchMultiSubmission,
+  sanitizeCompilerOptions,
+  sanitizeCommandLineArgs,
+} from '../middleware/validation.js';
 import { addSubmission, getSubmission, deleteSubmission } from '../../queue/producer.js';
 import { getLanguageById, getStatusById } from '../../languages/index.js';
 import { decodeIfNeeded, encodeIfNeeded } from '../../utils/base64.js';
 import logger from '../../utils/logger.js';
-import config from '../../utils/config.js';
 
 const router = Router();
 
 /**
  * Parse fields query parameter
- * @param {string} fields - Comma-separated list of fields
- * @returns {string[]|null} Array of field names or null for all fields
  */
 function parseFields(fields) {
   if (!fields) return null;
@@ -34,17 +38,17 @@ function filterFields(result, fields) {
 }
 
 /**
- * Format submission for response
+ * Format single-file submission for response
  */
-function formatSubmission(submission, options = {}) {
+function formatSingleSubmission(submission, options = {}) {
   const { base64Encoded = false, fields = null } = options;
 
   const result = {
     token: submission.token,
+    type: 'single',
     source_code: encodeIfNeeded(submission.source_code, base64Encoded),
     language_id: submission.language_id,
     stdin: encodeIfNeeded(submission.stdin, base64Encoded),
-    expected_output: encodeIfNeeded(submission.expected_output, base64Encoded),
     stdout: encodeIfNeeded(submission.stdout, base64Encoded),
     stderr: encodeIfNeeded(submission.stderr, base64Encoded),
     compile_output: encodeIfNeeded(submission.compile_output, base64Encoded),
@@ -63,6 +67,54 @@ function formatSubmission(submission, options = {}) {
 }
 
 /**
+ * Format multi-file submission for response
+ */
+function formatMultiSubmission(submission, options = {}) {
+  const { base64Encoded = false, fields = null } = options;
+
+  const result = {
+    token: submission.token,
+    type: 'multi',
+    language_id: submission.language_id,
+    status: submission.status,
+    compile: submission.compile
+      ? {
+          status: submission.compile.status,
+          output: encodeIfNeeded(submission.compile.output, base64Encoded),
+          time: submission.compile.time,
+          wall_time: submission.compile.wall_time,
+        }
+      : null,
+    executions: (submission.executions || []).map((exec) => ({
+      entryPoint: exec.entryPoint,
+      status: exec.status,
+      stdout: encodeIfNeeded(exec.stdout, base64Encoded),
+      stderr: encodeIfNeeded(exec.stderr, base64Encoded),
+      exit_code: exec.exit_code,
+      exit_signal: exec.exit_signal,
+      time: exec.time,
+      wall_time: exec.wall_time,
+      memory: exec.memory,
+    })),
+    message: submission.message,
+    created_at: submission.created_at,
+    finished_at: submission.finished_at,
+  };
+
+  return filterFields(result, fields);
+}
+
+/**
+ * Format submission (dispatch based on submission.type)
+ */
+function formatSubmission(submission, options = {}) {
+  if (submission.type === 'multi') {
+    return formatMultiSubmission(submission, options);
+  }
+  return formatSingleSubmission(submission, options);
+}
+
+/**
  * Wait for submission result with polling
  */
 async function waitForResult(token, maxWait = 30000) {
@@ -77,18 +129,137 @@ async function waitForResult(token, maxWait = 30000) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
   }
 
-  // Return current state if timeout
   return await getSubmission(token);
 }
 
 /**
+ * POST /submissions/multi/batch
+ * Submit multiple multi-file programs
+ */
+router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next) => {
+  try {
+    const runs = req.validatedBody.runs || req.validatedBody.submissions;
+    const results = [];
+
+    for (const data of runs) {
+      const language = getLanguageById(data.language_id);
+
+      const submission = {
+        token: uuidv4(),
+        type: 'multi',
+        language_id: data.language_id,
+        language,
+        files: data.files,
+        compileOrder: data.compileOrder || null,
+        executions: data.executions.map(e => ({
+          entryPoint: e.entryPoint,
+          stdin: e.stdin || '',
+          args: e.args || [],
+          cpu_time_limit: e.cpu_time_limit,
+          cpu_extra_time: e.cpu_extra_time,
+          wall_time_limit: e.wall_time_limit,
+          memory_limit: e.memory_limit,
+          stack_limit: e.stack_limit,
+          max_processes_and_or_threads: e.max_processes_and_or_threads,
+          max_file_size: e.max_file_size,
+        })),
+        compiler_options: sanitizeCompilerOptions(data.compiler_options),
+        redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
+        enable_network: data.enable_network,
+        callback_url: data.callback_url,
+        status: getStatusById(1), // In Queue
+        created_at: new Date().toISOString(),
+        finished_at: null,
+        compile: null,
+        message: null,
+      };
+
+      await addSubmission(submission);
+      results.push({ token: submission.token });
+    }
+
+    logger.info({
+      event: 'batch_multi_submission_created',
+      count: results.length,
+    });
+
+    res.status(201).json(results);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /submissions/multi
+ * Submit a multi-file program
+ */
+router.post('/multi', validateMultiSubmission, async (req, res, next) => {
+  try {
+    const data = req.validatedBody;
+    const base64Encoded = req.query.base64_encoded === 'true';
+    const wait = req.query.wait === 'true';
+    const fields = parseFields(req.query.fields);
+
+    const language = getLanguageById(data.language_id);
+
+    const submission = {
+      token: uuidv4(),
+      type: 'multi',
+      language_id: data.language_id,
+      language,
+      files: data.files,
+      compileOrder: data.compileOrder || null,
+      executions: data.executions.map(e => ({
+        entryPoint: e.entryPoint,
+        stdin: e.stdin || '',
+        args: e.args || [],
+        cpu_time_limit: e.cpu_time_limit,
+        cpu_extra_time: e.cpu_extra_time,
+        wall_time_limit: e.wall_time_limit,
+        memory_limit: e.memory_limit,
+        stack_limit: e.stack_limit,
+        max_processes_and_or_threads: e.max_processes_and_or_threads,
+        max_file_size: e.max_file_size,
+      })),
+      compiler_options: sanitizeCompilerOptions(data.compiler_options),
+      redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
+      enable_network: data.enable_network,
+      callback_url: data.callback_url,
+      status: getStatusById(1), // In Queue
+      created_at: new Date().toISOString(),
+      finished_at: null,
+      compile: null,
+      message: null,
+    };
+
+    await addSubmission(submission);
+
+    logger.info({
+      event: 'multi_submission_created',
+      token: submission.token,
+      language_id: submission.language_id,
+      files_count: submission.files.length,
+      executions_count: submission.executions.length,
+    });
+
+    if (wait) {
+      const result = await waitForResult(submission.token);
+      res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
+    } else {
+      res.status(201).json({ token: submission.token });
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /submissions/batch
- * Create multiple submissions
- * NOTE: Must be defined BEFORE /:token routes
+ * Submit multiple single-file programs
  */
 router.post('/batch', validateBatchSubmission, async (req, res, next) => {
   try {
-    const { submissions } = req.validatedBody;
+    const submissions = req.validatedBody.runs || req.validatedBody.submissions;
     const base64Encoded = req.query.base64_encoded === 'true';
 
     const results = [];
@@ -96,16 +267,15 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
     for (const data of submissions) {
       const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
       const stdin = decodeIfNeeded(data.stdin, base64Encoded);
-      const expectedOutput = decodeIfNeeded(data.expected_output, base64Encoded);
       const language = getLanguageById(data.language_id);
 
       const submission = {
         token: uuidv4(),
+        type: 'single',
         source_code: sourceCode,
         language_id: data.language_id,
         language,
         stdin: stdin || '',
-        expected_output: expectedOutput,
         cpu_time_limit: data.cpu_time_limit,
         cpu_extra_time: data.cpu_extra_time,
         wall_time_limit: data.wall_time_limit,
@@ -118,8 +288,8 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
         redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
         enable_network: data.enable_network,
         callback_url: data.callback_url,
-        additional_files: data.additional_files,
-        status: getStatusById(1),
+        additional_files: data.additional_files || null,
+        status: getStatusById(1), // In Queue
         created_at: new Date().toISOString(),
         finished_at: null,
         time: null,
@@ -151,7 +321,6 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
 /**
  * GET /submissions/batch
  * Get multiple submissions by tokens
- * NOTE: Must be defined BEFORE /:token routes
  */
 router.get('/batch', async (req, res, next) => {
   try {
@@ -185,7 +354,7 @@ router.get('/batch', async (req, res, next) => {
       })
     );
 
-    res.json({ submissions: results });
+    res.json({ submissions: results, runs: results });
   } catch (error) {
     next(error);
   }
@@ -193,7 +362,7 @@ router.get('/batch', async (req, res, next) => {
 
 /**
  * POST /submissions
- * Create a new submission
+ * Submit a single-file program
  */
 router.post('/', validateSubmission, async (req, res, next) => {
   try {
@@ -202,22 +371,17 @@ router.post('/', validateSubmission, async (req, res, next) => {
     const wait = req.query.wait === 'true';
     const fields = parseFields(req.query.fields);
 
-    // Decode base64 if needed
     const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
     const stdin = decodeIfNeeded(data.stdin, base64Encoded);
-    const expectedOutput = decodeIfNeeded(data.expected_output, base64Encoded);
-
-    // Get language config
     const language = getLanguageById(data.language_id);
 
-    // Create submission object
     const submission = {
       token: uuidv4(),
+      type: 'single',
       source_code: sourceCode,
       language_id: data.language_id,
       language,
       stdin: stdin || '',
-      expected_output: expectedOutput,
       cpu_time_limit: data.cpu_time_limit,
       cpu_extra_time: data.cpu_extra_time,
       wall_time_limit: data.wall_time_limit,
@@ -230,7 +394,7 @@ router.post('/', validateSubmission, async (req, res, next) => {
       redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
       enable_network: data.enable_network,
       callback_url: data.callback_url,
-      additional_files: data.additional_files,
+      additional_files: data.additional_files || null,
       status: getStatusById(1), // In Queue
       created_at: new Date().toISOString(),
       finished_at: null,
@@ -245,7 +409,6 @@ router.post('/', validateSubmission, async (req, res, next) => {
       exit_signal: null,
     };
 
-    // Add to queue
     await addSubmission(submission);
 
     logger.info({
@@ -255,11 +418,9 @@ router.post('/', validateSubmission, async (req, res, next) => {
     });
 
     if (wait) {
-      // Wait for result
       const result = await waitForResult(submission.token);
       res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
     } else {
-      // Return immediately with token
       res.status(201).json({ token: submission.token });
     }
   } catch (error) {
@@ -269,7 +430,7 @@ router.post('/', validateSubmission, async (req, res, next) => {
 
 /**
  * GET /submissions/:token
- * Get submission by token
+ * Get submission by token (works for both single and multi-file)
  */
 router.get('/:token', async (req, res, next) => {
   try {
@@ -316,3 +477,4 @@ router.delete('/:token', async (req, res, next) => {
 });
 
 export default router;
+

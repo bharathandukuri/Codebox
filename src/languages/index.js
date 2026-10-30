@@ -3,28 +3,14 @@ import javascript from './javascript.js';
 import cpp from './cpp.js';
 import c from './c.js';
 import java from './java.js';
-import multi from './multi.js';
 import typescript from './typescript.js';
 
 // Map of all supported languages by ID
 const languagesById = new Map();
-const languagesList = [python, javascript, cpp, c, java, multi, typescript];
+const languagesList = [c, cpp, java, javascript, python, typescript];
 
 languagesList.forEach(lang => {
   languagesById.set(lang.id, lang);
-});
-
-// RapidAPI Judge0 CE Extra language ID aliases.
-// The frontend sends these IDs; map them to our standard configs.
-const RAPIDAPI_ALIASES = {
-  93: javascript,   // JavaScript (Node.js 18.15.0)
-  102: javascript,  // JavaScript (Node.js 22.x)
-  94: typescript,   // TypeScript (5.0.3)
-  92: python,       // Python (3.11.2)
-};
-
-Object.entries(RAPIDAPI_ALIASES).forEach(([aliasId, lang]) => {
-  languagesById.set(Number(aliasId), lang);
 });
 
 /**

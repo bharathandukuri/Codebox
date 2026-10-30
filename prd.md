@@ -1,48 +1,46 @@
-# Product Requirements Document: CodeRunner v1.1
+# Product Requirements Document: CodeBox (Pure Execution Engine)
 
 ## Executive Summary
 
-CodeRunner is a modern, high-performance code execution engine designed as a drop-in replacement for Judge0. Built on Node.js/Express with Firecracker microVMs as the primary execution environment and Docker containers as a fallback, it provides secure, isolated code execution with full API compatibility while delivering superior performance and reliability.
+CodeBox is a high-performance, sandboxed code execution engine built on Node.js/Express, Docker, and Linux sandboxes (Isolate / Firecracker). Originally developed within the ChaiCode / Chai aur Code ecosystem, this updated architecture focuses strictly on **pure code execution** rather than grading or string-matching evaluations. It provides dedicated single-file execution and a native, clean multi-file execution pipeline (`POST /submissions/multi`) within a single sandbox lifecycle.
+
+> Special credit and acknowledgement to **Chai aur Code** & **Hitesh Choudhary** for creating the foundational CodeBox platform.
 
 ## Product Vision
 
-Create the fastest, most reliable code execution service that seamlessly replaces Judge0 while leveraging modern infrastructure technologies to provide better isolation, performance, and developer experience.
+Deliver a reliable, low-latency, and sandboxed code execution service that executes untrusted code, captures stdout, stderr, execution duration, and peak memory, and returns pure execution telemetry to calling client platforms.
 
 ## Goals and Success Metrics
 
 ### Primary Goals
-- **100% API Compatibility**: Support all Judge0 API endpoints and language codes
-- **Performance**: 3-5x faster execution times compared to Judge0
-- **Reliability**: 99.9% uptime with graceful failure handling
-- **Security**: Military-grade isolation using Firecracker microVMs with Docker fallback
-- **Flexible Deployment**: Support both Firecracker (KVM-enabled) and Docker-only environments
+- **Pure Execution Focus**: Execute code with standard inputs without evaluation side-effects or forced comparisons.
+- **Native Multi-File Execution**: Enable multi-file projects through clean JSON payloads, compiling once and executing sequentially in a single container.
+- **Multi-Sandbox Support**: Isolate cgroups sandboxing, Docker container sandboxing, and Firecracker microVMs.
+- **Clean Language Identifiers**: Simplified sequential IDs:
+  - `1`: C
+  - `2`: C++
+  - `3`: Java
+  - `4`: JavaScript
+  - `5`: Python
+  - `6`: TypeScript
 
 ### Success Metrics
-- Average execution time < 500ms for simple programs
-- Cold start time < 100ms for Firecracker VMs, < 2s for Docker
-- Support for 50+ programming languages
-- Handle 1000+ concurrent executions
-- API response time < 50ms (excluding code execution)
-
-## Target Users
-
-1. **Coding Platform Developers**: Building online IDEs, coding bootcamps, interview platforms
-2. **Educational Technology Companies**: Running automated code grading systems
-3. **Existing Judge0 Users**: Seeking better performance and modern infrastructure
-4. **API-First Companies**: Requiring programmatic code execution at scale
+- Average execution time < 500ms for interpreted code
+- Cold start time < 150ms with pre-warmed containers / Isolate
+- Support single and batch executions with high concurrency
 
 ## Core Features
 
-### 1. Judge0 API Compatibility Layer
-
-**Endpoints to Support:**
-- `POST /submissions` - Create submission
-- `GET /submissions/:token` - Get submission status
-- `POST /submissions/batch` - Batch submissions
-- `GET /submissions/batch` - Batch submission status
-- `GET /languages` - List supported languages
+### 1. Submissions API
+- `POST /submissions` - Create single-file submission
+- `GET /submissions/:token` - Get unified submission status and output (single & multi-file)
+- `POST /submissions/batch` - Batch submit single-file runs
+- `GET /submissions/batch` - Batch query submissions
+- `POST /submissions/multi` - Create multi-file submission
+- `POST /submissions/multi/batch` - Batch submit multi-file runs
+- `GET /languages` - List active languages
 - `GET /statuses` - List execution statuses
-- `GET /about` - System information
+- `GET /health` - Health check
 
 **Request/Response Format:**
 - Identical JSON structure to Judge0

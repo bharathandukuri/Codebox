@@ -27,16 +27,16 @@ describe('CodeBox API', () => {
 
       assert.strictEqual(res.status, 200);
       assert(Array.isArray(data));
-      assert(data.length > 0);
-      assert(data.some(l => l.id === 71)); // Python
+      assert.strictEqual(data.length, 6);
+      assert(data.some(l => l.id === 5)); // Python (ID 5)
     });
 
     it('should get language by ID', async () => {
-      const res = await fetch(`${BASE_URL}/languages/71`, { headers });
+      const res = await fetch(`${BASE_URL}/languages/5`, { headers });
       const data = await res.json();
 
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(data.id, 71);
+      assert.strictEqual(data.id, 5);
       assert(data.name.includes('Python'));
     });
 
@@ -57,7 +57,7 @@ describe('CodeBox API', () => {
     });
   });
 
-  describe('Submissions', () => {
+  describe('Submissions (/submissions)', () => {
     let submissionToken;
 
     it('should create a Python submission', async () => {
@@ -66,7 +66,7 @@ describe('CodeBox API', () => {
         headers,
         body: JSON.stringify({
           source_code: 'print("Hello, World!")',
-          language_id: 71,
+          language_id: 5,
         }),
       });
       const data = await res.json();
@@ -94,7 +94,7 @@ describe('CodeBox API', () => {
         headers,
         body: JSON.stringify({
           source_code: 'print(1 + 1)',
-          language_id: 71,
+          language_id: 5,
         }),
       });
       const data = await res.json();
@@ -102,7 +102,6 @@ describe('CodeBox API', () => {
       assert.strictEqual(res.status, 201);
       assert(data.token);
       assert(data.status);
-      // If execution completed, should have stdout
       if (data.status.id === 3) {
         assert(data.stdout.includes('2'));
       }
@@ -113,8 +112,7 @@ describe('CodeBox API', () => {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          language_id: 71,
-          // Missing source_code
+          language_id: 5,
         }),
       });
 
@@ -142,8 +140,8 @@ describe('CodeBox API', () => {
         headers,
         body: JSON.stringify({
           submissions: [
-            { source_code: 'print(1)', language_id: 71 },
-            { source_code: 'print(2)', language_id: 71 },
+            { source_code: 'print(1)', language_id: 5 },
+            { source_code: 'print(2)', language_id: 5 },
           ],
         }),
       });
@@ -154,6 +152,152 @@ describe('CodeBox API', () => {
       assert.strictEqual(data.length, 2);
       assert(data[0].token);
       assert(data[1].token);
+    });
+  });
+
+  describe('Multi-File Submissions', () => {
+    it('should create a multi-file Python submission with wait=true', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 5,
+          files: [
+            { path: 'helper.py', content: 'def greet():\n    return "Hello from helper"' },
+            { path: 'main.py', content: 'from helper import greet\nprint(greet())' },
+            { path: 'test.py', content: 'print("Testing 123")' },
+          ],
+          executions: [
+            { entryPoint: 'main.py' },
+            { entryPoint: 'test.py' },
+          ],
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert(data.token);
+      assert.strictEqual(data.type, 'multi');
+      assert(Array.isArray(data.executions));
+      assert.strictEqual(data.executions.length, 2);
+    });
+
+    it('should validate multi-file missing required fields', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 5,
+          // Missing files and executions
+        }),
+      });
+
+      assert.strictEqual(res.status, 422);
+    });
+
+    it('should reject path traversal in multi-file paths', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 5,
+          files: [
+            { path: '../evil.py', content: 'print("exploit")' },
+          ],
+          executions: [
+            { entryPoint: 'evil.py' },
+          ],
+        }),
+      });
+
+      assert.strictEqual(res.status, 422);
+    });
+
+    it('should reject absolute paths in multi-file paths', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 5,
+          files: [
+            { path: '/etc/passwd.py', content: 'print("exploit")' },
+          ],
+          executions: [
+            { entryPoint: 'passwd.py' },
+          ],
+        }),
+      });
+
+      assert.strictEqual(res.status, 422);
+    });
+
+    it('should create batch multi-file submissions', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi/batch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          submissions: [
+            {
+              language_id: 5,
+              files: [{ path: 'main.py', content: 'print(1)' }],
+              executions: [{ entryPoint: 'main.py' }],
+            },
+            {
+              language_id: 5,
+              files: [{ path: 'main.py', content: 'print(2)' }],
+              executions: [{ entryPoint: 'main.py' }],
+            },
+          ],
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert(Array.isArray(data));
+      assert.strictEqual(data.length, 2);
+      assert(data[0].token);
+      assert(data[1].token);
+    });
+  });
+
+  describe('Authentication & Security', () => {
+    it('should reject requests without auth token on protected routes', async () => {
+      const res = await fetch(`${BASE_URL}/languages`);
+      assert.strictEqual(res.status, 401);
+    });
+
+    it('should reject requests with invalid auth token', async () => {
+      const res = await fetch(`${BASE_URL}/languages`, {
+        headers: {
+          'X-Auth-Token': 'invalid-token-12345',
+        },
+      });
+      assert.strictEqual(res.status, 401);
+    });
+
+    it('should reject SSRF attempts in callback_url', async () => {
+      const res = await fetch(`${BASE_URL}/submissions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'print(1)',
+          language_id: 5,
+          callback_url: 'http://169.254.169.254/latest/meta-data',
+        }),
+      });
+
+      assert.strictEqual(res.status, 422);
+    });
+  });
+
+  describe('Delete Submission', () => {
+    it('should return 404 when deleting non-existent submission', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/non-existent-token-1234`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      assert.strictEqual(res.status, 404);
     });
   });
 
