@@ -232,7 +232,7 @@ class IsolateExecutor {
     const args = [
       `--box-id=${boxId}`,
       '--cg',
-      `--cg-mem=${memoryLimit}`,           // cgroup memory limit (KB)
+      ...(memoryLimit ? [`--cg-mem=${memoryLimit}`] : []),
       `--meta=${metaPath}`,                // host path (written by parent process)
       `--time=${timeLimit}`,
       `--wall-time=${wallTimeLimit}`,

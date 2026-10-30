@@ -176,9 +176,9 @@ class DockerExecutor {
     const { language, memory_limit, max_processes_and_or_threads, enable_network } = submission;
 
     // Use at least the language's minimum memory (e.g. tsc needs ~400MB)
-    const effectiveMemory = Math.max(memory_limit, language.min_memory || 0);
+    const effectiveMemory = memory_limit ? Math.max(memory_limit, language.min_memory || 0) : (language.min_memory || 0);
 
-    const boxSize = Math.max(Math.ceil(effectiveMemory / 1024), 128); // at least 128MB for /box
+    const boxSize = effectiveMemory > 0 ? Math.max(Math.ceil(effectiveMemory / 1024), 128) : 256; // at least 128MB for /box
 
     const containerConfig = {
       Image: language.image,
@@ -187,8 +187,8 @@ class DockerExecutor {
       // User is set in Dockerfile for each language image
       NetworkDisabled: !enable_network,
       HostConfig: {
-        Memory: effectiveMemory * 1024, // Convert KB to bytes
-        MemorySwap: effectiveMemory * 1024, // Disable swap
+        Memory: effectiveMemory > 0 ? effectiveMemory * 1024 : 0, // Convert KB to bytes, or 0 for unlimited
+        MemorySwap: effectiveMemory > 0 ? effectiveMemory * 1024 : 0, // Disable swap, or 0 for unlimited
         CpuPeriod: 100000,
         CpuQuota: 100000, // 1 CPU
         PidsLimit: max_processes_and_or_threads,
@@ -447,9 +447,13 @@ class DockerExecutor {
       // 1. Create and start a single container for the entire lifecycle
       // Pass the language and limits of the first execution / overall submission
       const baseLimits = executions[0] || {};
+      const isSqlite = language.id === 7;
+      const memLimits = executions.map(e => e.memory_limit).filter(m => m != null);
+      const effectiveMultiMemory = memLimits.length > 0 ? Math.max(...memLimits) : (isSqlite ? null : 256000);
+
       const containerSubmission = {
         language,
-        memory_limit: Math.max(...executions.map(e => e.memory_limit || 256000), 256000),
+        memory_limit: effectiveMultiMemory,
         max_processes_and_or_threads: Math.max(...executions.map(e => e.max_processes_and_or_threads || 64), 64),
         enable_network: submission.enable_network || false,
       };

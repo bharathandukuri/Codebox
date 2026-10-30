@@ -312,6 +312,40 @@ describe('CodeBox API', () => {
       assert(data.executions[1].stdout.includes('alice@example.com'));
     });
 
+    it('should support SQLite with timelimit and no memory_limit', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 7,
+          timelimit: 5,
+          source_code: "CREATE TABLE t (v INT); INSERT INTO t VALUES (100); SELECT * FROM t;",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert.strictEqual(data.memory, null);
+      assert(data.stdout.includes('100'));
+    });
+
+    it('should enforce time_limit for long-running SQLite queries (TLE)', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 7,
+          time_limit: 1,
+          source_code: "WITH RECURSIVE r(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM r WHERE i < 100000000) SELECT count(*) FROM r;",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // Time Limit Exceeded
+    });
+
     it('should reject dangerous SQLite statements', async () => {
       const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
         method: 'POST',

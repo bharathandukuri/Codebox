@@ -13,13 +13,12 @@ const runSchema = Joi.object({
     return value;
   }),
   stdin: Joi.string().allow('', null).default(''),
-  cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit)
-    .default(config.execution.defaultCpuTimeLimit),
+  time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
   cpu_extra_time: Joi.number().min(0).max(5).default(1),
-  wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit)
-    .default(config.execution.defaultWallTimeLimit),
-  memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit)
-    .default(config.execution.defaultMemoryLimit),
+  wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
   stack_limit: Joi.number().min(0).max(config.execution.defaultStackLimit)
     .default(config.execution.defaultStackLimit),
   max_processes_and_or_threads: Joi.number().min(1).max(config.execution.maxProcesses)
@@ -75,6 +74,11 @@ const multiFileRunSchema = Joi.object({
     }
     return value;
   }),
+  time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
+  wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
   files: Joi.array().items(
     Joi.object({
       path: Joi.string().required().custom((value, helpers) => {
@@ -99,13 +103,12 @@ const multiFileRunSchema = Joi.object({
       entryPoint: Joi.string().required(),
       stdin: Joi.string().allow('', null).default(''),
       args: Joi.array().items(Joi.string()).default([]),
-      cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit)
-        .default(config.execution.defaultCpuTimeLimit),
+      time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+      timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+      cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
       cpu_extra_time: Joi.number().min(0).max(5).default(1),
-      wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit)
-        .default(config.execution.defaultWallTimeLimit),
-      memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit)
-        .default(config.execution.defaultMemoryLimit),
+      wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+      memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
       stack_limit: Joi.number().min(0).max(config.execution.defaultStackLimit)
         .default(config.execution.defaultStackLimit),
       max_processes_and_or_threads: Joi.number().min(1).max(config.execution.maxProcesses)

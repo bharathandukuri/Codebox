@@ -11,6 +11,7 @@ import {
 import { addSubmission, getSubmission, deleteSubmission } from '../../queue/producer.js';
 import { getLanguageById, getStatusById } from '../../languages/index.js';
 import { decodeIfNeeded, encodeIfNeeded } from '../../utils/base64.js';
+import config from '../../utils/config.js';
 import logger from '../../utils/logger.js';
 
 const router = Router();
@@ -143,6 +144,9 @@ router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next)
 
     for (const data of runs) {
       const language = getLanguageById(data.language_id);
+      const isSqlite = data.language_id === 7;
+      const rootTimeLimit = data.time_limit ?? data.timelimit;
+      const defaultMemory = isSqlite ? null : config.execution.defaultMemoryLimit;
 
       const submission = {
         token: uuidv4(),
@@ -151,18 +155,24 @@ router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next)
         language,
         files: data.files,
         compileOrder: data.compileOrder || null,
-        executions: data.executions.map(e => ({
-          entryPoint: e.entryPoint,
-          stdin: e.stdin || '',
-          args: e.args || [],
-          cpu_time_limit: e.cpu_time_limit,
-          cpu_extra_time: e.cpu_extra_time,
-          wall_time_limit: e.wall_time_limit,
-          memory_limit: e.memory_limit,
-          stack_limit: e.stack_limit,
-          max_processes_and_or_threads: e.max_processes_and_or_threads,
-          max_file_size: e.max_file_size,
-        })),
+        executions: data.executions.map(e => {
+          const execTimeLimit = e.time_limit ?? e.timelimit ?? rootTimeLimit;
+          const cpuTimeLimit = execTimeLimit ?? e.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
+          const wallTimeLimit = execTimeLimit ?? e.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+          const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
+          return {
+            entryPoint: e.entryPoint,
+            stdin: e.stdin || '',
+            args: e.args || [],
+            cpu_time_limit: cpuTimeLimit,
+            cpu_extra_time: e.cpu_extra_time || 1,
+            wall_time_limit: wallTimeLimit,
+            memory_limit: memoryLimit,
+            stack_limit: e.stack_limit,
+            max_processes_and_or_threads: e.max_processes_and_or_threads,
+            max_file_size: e.max_file_size,
+          };
+        }),
         compiler_options: sanitizeCompilerOptions(data.compiler_options),
         redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
         enable_network: data.enable_network,
@@ -201,6 +211,9 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
     const fields = parseFields(req.query.fields);
 
     const language = getLanguageById(data.language_id);
+    const isSqlite = data.language_id === 7;
+    const rootTimeLimit = data.time_limit ?? data.timelimit;
+    const defaultMemory = isSqlite ? null : config.execution.defaultMemoryLimit;
 
     const submission = {
       token: uuidv4(),
@@ -209,18 +222,24 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
       language,
       files: data.files,
       compileOrder: data.compileOrder || null,
-      executions: data.executions.map(e => ({
-        entryPoint: e.entryPoint,
-        stdin: e.stdin || '',
-        args: e.args || [],
-        cpu_time_limit: e.cpu_time_limit,
-        cpu_extra_time: e.cpu_extra_time,
-        wall_time_limit: e.wall_time_limit,
-        memory_limit: e.memory_limit,
-        stack_limit: e.stack_limit,
-        max_processes_and_or_threads: e.max_processes_and_or_threads,
-        max_file_size: e.max_file_size,
-      })),
+      executions: data.executions.map(e => {
+        const execTimeLimit = e.time_limit ?? e.timelimit ?? rootTimeLimit;
+        const cpuTimeLimit = execTimeLimit ?? e.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
+        const wallTimeLimit = execTimeLimit ?? e.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+        const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
+        return {
+          entryPoint: e.entryPoint,
+          stdin: e.stdin || '',
+          args: e.args || [],
+          cpu_time_limit: cpuTimeLimit,
+          cpu_extra_time: e.cpu_extra_time || 1,
+          wall_time_limit: wallTimeLimit,
+          memory_limit: memoryLimit,
+          stack_limit: e.stack_limit,
+          max_processes_and_or_threads: e.max_processes_and_or_threads,
+          max_file_size: e.max_file_size,
+        };
+      }),
       compiler_options: sanitizeCompilerOptions(data.compiler_options),
       redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
       enable_network: data.enable_network,
@@ -268,6 +287,11 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
       const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
       const stdin = decodeIfNeeded(data.stdin, base64Encoded);
       const language = getLanguageById(data.language_id);
+      const isSqlite = data.language_id === 7;
+      const effectiveTimeLimit = data.time_limit ?? data.timelimit;
+      const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
+      const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+      const memoryLimit = data.memory_limit ?? (isSqlite ? null : config.execution.defaultMemoryLimit);
 
       const submission = {
         token: uuidv4(),
@@ -276,10 +300,10 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
         language_id: data.language_id,
         language,
         stdin: stdin || '',
-        cpu_time_limit: data.cpu_time_limit,
-        cpu_extra_time: data.cpu_extra_time,
-        wall_time_limit: data.wall_time_limit,
-        memory_limit: data.memory_limit,
+        cpu_time_limit: cpuTimeLimit,
+        cpu_extra_time: data.cpu_extra_time || 1,
+        wall_time_limit: wallTimeLimit,
+        memory_limit: memoryLimit,
         stack_limit: data.stack_limit,
         max_processes_and_or_threads: data.max_processes_and_or_threads,
         max_file_size: data.max_file_size,
@@ -374,6 +398,11 @@ router.post('/', validateSubmission, async (req, res, next) => {
     const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
     const stdin = decodeIfNeeded(data.stdin, base64Encoded);
     const language = getLanguageById(data.language_id);
+    const isSqlite = data.language_id === 7;
+    const effectiveTimeLimit = data.time_limit ?? data.timelimit;
+    const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
+    const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+    const memoryLimit = data.memory_limit ?? (isSqlite ? null : config.execution.defaultMemoryLimit);
 
     const submission = {
       token: uuidv4(),
@@ -382,10 +411,10 @@ router.post('/', validateSubmission, async (req, res, next) => {
       language_id: data.language_id,
       language,
       stdin: stdin || '',
-      cpu_time_limit: data.cpu_time_limit,
-      cpu_extra_time: data.cpu_extra_time,
-      wall_time_limit: data.wall_time_limit,
-      memory_limit: data.memory_limit,
+      cpu_time_limit: cpuTimeLimit,
+      cpu_extra_time: data.cpu_extra_time || 1,
+      wall_time_limit: wallTimeLimit,
+      memory_limit: memoryLimit,
       stack_limit: data.stack_limit,
       max_processes_and_or_threads: data.max_processes_and_or_threads,
       max_file_size: data.max_file_size,
