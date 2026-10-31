@@ -5,6 +5,7 @@ import logger from '../utils/logger.js';
 import { executeCode } from './jobs/executeCode.js';
 import { executeMultiCode } from './jobs/executeMultiCode.js';
 import { getStatusById } from '../languages/index.js';
+import { getDatabasePool } from '../executor/pool/DatabaseContainerPool.js';
 
 let redis = null;
 let worker = null;
@@ -143,6 +144,16 @@ export async function startWorker() {
     concurrency: config.worker.concurrency,
   });
 
+  // Pre-warm database pool for worker
+  try {
+    const pool = getDatabasePool();
+    pool.warmPool().catch(err => {
+      logger.error({ event: 'pool_warmup_error', error: err.message });
+    });
+  } catch (poolErr) {
+    logger.warn({ event: 'pool_init_skipped', message: poolErr.message });
+  }
+
   return worker;
 }
 
@@ -150,6 +161,13 @@ export async function startWorker() {
  * Stop the worker gracefully
  */
 export async function stopWorker() {
+  try {
+    const pool = getDatabasePool();
+    await pool.shutdown();
+  } catch (poolErr) {
+    logger.warn({ event: 'pool_shutdown_error', message: poolErr.message });
+  }
+
   if (worker) {
     await worker.close();
     logger.info('Worker stopped');

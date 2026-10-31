@@ -45,8 +45,8 @@ class ResultParser {
       status = getStatusById(12); // Runtime Error (Other)
     }
 
-    // Truncate output if too long
-    const maxOutputLength = 65536;
+    // Truncate output if too long (max_file_size in KB, default 1024 KB = 1MB)
+    const maxOutputLength = (submission && submission.max_file_size ? submission.max_file_size * 1024 : 1024 * 1024);
     const truncatedStdout = this.truncate(stdout, maxOutputLength);
     const truncatedStderr = this.truncate(stderr, maxOutputLength);
 

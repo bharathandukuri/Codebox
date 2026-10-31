@@ -5,10 +5,12 @@ import c from './c.js';
 import java from './java.js';
 import typescript from './typescript.js';
 import sqlite from './sqlite.js';
+import postgres from './postgres.js';
+import mysql from './mysql.js';
 
 // Map of all supported languages by ID
 const languagesById = new Map();
-const languagesList = [c, cpp, java, javascript, python, typescript, sqlite];
+const languagesList = [c, cpp, java, javascript, python, typescript, sqlite, postgres, mysql];
 
 languagesList.forEach(lang => {
   languagesById.set(lang.id, lang);

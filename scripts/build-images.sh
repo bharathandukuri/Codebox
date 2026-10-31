@@ -29,6 +29,12 @@ docker build -t codebox/typescript:5 "$PROJECT_DIR/docker/images/typescript/"
 echo "Building SQLite 3 image..."
 docker build -t codebox/sqlite:3 "$PROJECT_DIR/docker/images/sqlite/"
 
+echo "Building PostgreSQL 16 image..."
+docker build -t codebox/postgres:16 "$PROJECT_DIR/docker/images/postgres/"
+
+echo "Building MySQL 8.4 LTS image..."
+docker build -t codebox/mysql:8.4 "$PROJECT_DIR/docker/images/mysql/"
+
 echo "Building Multi-runtime image..."
 docker build -t codebox/multi:latest "$PROJECT_DIR/docker/images/multi/"
 

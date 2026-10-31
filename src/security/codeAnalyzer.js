@@ -98,6 +98,22 @@ const SQL_PATTERNS = [
   { pattern: /ATTACH\s+DATABASE/i, reason: 'sqlite attach database' },
 ];
 
+// ── SQL / PostgreSQL patterns (language ID 8) ───────────────────────────────
+const PG_SQL_PATTERNS = [
+  { pattern: /\\!/i, reason: 'psql shell escape' },
+  { pattern: /\\copy\b/i, reason: 'psql copy escape' },
+  { pattern: /ALTER\s+SYSTEM/i, reason: 'postgres alter system' },
+];
+
+// ── SQL / MySQL patterns (language ID 9) ────────────────────────────────────
+const MYSQL_PATTERNS = [
+  { pattern: /\\!/i, reason: 'mysql shell escape' },
+  { pattern: /\bsystem\s+/i, reason: 'mysql system escape' },
+  { pattern: /INTO\s+OUTFILE/i, reason: 'mysql into outfile' },
+  { pattern: /INTO\s+DUMPFILE/i, reason: 'mysql into dumpfile' },
+  { pattern: /LOAD\s+DATA/i, reason: 'mysql load data' },
+];
+
 // ── Map language IDs to their pattern sets ───────────────────────────────────
 const LANGUAGE_PATTERNS = {
   1: C_CPP_PATTERNS,    // C
@@ -107,6 +123,8 @@ const LANGUAGE_PATTERNS = {
   5: PYTHON_PATTERNS,   // Python
   6: JS_PATTERNS,       // TypeScript
   7: SQL_PATTERNS,      // SQL (SQLite 3)
+  8: PG_SQL_PATTERNS,   // PostgreSQL 16
+  9: MYSQL_PATTERNS,    // MySQL 8.4 LTS
 };
 
 /**

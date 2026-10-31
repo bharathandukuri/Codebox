@@ -1,8 +1,10 @@
 import Docker from 'dockerode';
+import { PassThrough } from 'stream';
 import config from '../utils/config.js';
 import logger from '../utils/logger.js';
 import { getStatusById } from '../languages/index.js';
 import ResultParser from './ResultParser.js';
+import { getDatabasePool } from './pool/DatabaseContainerPool.js';
 
 const MULTI_FILE_LANGUAGE_ID = 89;
 
@@ -20,13 +22,16 @@ class DockerExecutor {
   async execute(submission) {
     const { language } = submission;
     let container = null;
+    const isPooled = (language.id === 8 || language.id === 9);
 
     try {
-      // Create container with security limits
-      container = await this.createContainer(submission);
-
-      // Start container
-      await container.start();
+      if (isPooled) {
+        const pool = getDatabasePool(this.docker);
+        container = await pool.acquire(language.id);
+      } else {
+        container = await this.createContainer(submission);
+        await container.start();
+      }
 
       if (language.id === MULTI_FILE_LANGUAGE_ID) {
         // Multi-file program: extract ZIP, then run compile/run scripts
@@ -68,7 +73,13 @@ class DockerExecutor {
       }
 
       // Run the program
-      const runCmd = this.buildRunCommand(language.run_cmd, submission.command_line_arguments);
+      let runCmd = '';
+      if (language.id === 8 || language.id === 9) {
+        runCmd = `node /opt/runner/runner.js '/box/${language.source_file}' ${submission.wall_time_limit}`;
+      } else {
+        runCmd = this.buildRunCommand(language.run_cmd, submission.command_line_arguments);
+      }
+
       const result = await this.runCommand(
         container,
         runCmd,
@@ -101,11 +112,16 @@ class DockerExecutor {
     } finally {
       // Cleanup container
       if (container) {
-        try {
-          await container.stop({ t: 1 }).catch(() => {});
-          await container.remove({ force: true });
-        } catch (err) {
-          logger.warn({ err }, 'Failed to cleanup container');
+        if (isPooled) {
+          const pool = getDatabasePool(this.docker);
+          pool.release(container);
+        } else {
+          try {
+            await container.stop({ t: 1 }).catch(() => {});
+            await container.remove({ force: true });
+          } catch (err) {
+            logger.warn({ err }, 'Failed to cleanup container');
+          }
         }
       }
     }
@@ -344,6 +360,7 @@ class DockerExecutor {
       AttachStderr: true,
       AttachStdin: !!stdin,
       WorkingDir: '/box',
+      User: '1001:1001',
     });
 
     return new Promise((resolve, reject) => {
@@ -370,33 +387,16 @@ class DockerExecutor {
           stream.end();
         }
 
-        // Demux stdout and stderr
+        // Demux stdout and stderr using Dockerode modem
         const stdoutChunks = [];
         const stderrChunks = [];
+        const stdoutStream = new PassThrough();
+        const stderrStream = new PassThrough();
 
-        stream.on('data', (chunk) => {
-          // Docker multiplexes stdout/stderr with 8-byte header
-          // Header: [stream type (1 byte), 0, 0, 0, size (4 bytes)]
-          let offset = 0;
-          while (offset < chunk.length) {
-            if (offset + 8 > chunk.length) break;
+        stdoutStream.on('data', (chunk) => stdoutChunks.push(chunk));
+        stderrStream.on('data', (chunk) => stderrChunks.push(chunk));
 
-            const streamType = chunk[offset];
-            const size = chunk.readUInt32BE(offset + 4);
-
-            if (offset + 8 + size > chunk.length) break;
-
-            const data = chunk.slice(offset + 8, offset + 8 + size);
-
-            if (streamType === 1) {
-              stdoutChunks.push(data);
-            } else if (streamType === 2) {
-              stderrChunks.push(data);
-            }
-
-            offset += 8 + size;
-          }
-        });
+        this.docker.modem.demuxStream(stream, stdoutStream, stderrStream);
 
         stream.on('end', async () => {
           clearTimeout(timeout);
@@ -442,24 +442,27 @@ class DockerExecutor {
   async executeMulti(submission) {
     const { language, files, executions, compileOrder, compiler_options } = submission;
     let container = null;
+    const isPooled = (language.id === 8 || language.id === 9);
 
     try {
-      // 1. Create and start a single container for the entire lifecycle
-      // Pass the language and limits of the first execution / overall submission
-      const baseLimits = executions[0] || {};
-      const isSqlite = language.id === 7;
-      const memLimits = executions.map(e => e.memory_limit).filter(m => m != null);
-      const effectiveMultiMemory = memLimits.length > 0 ? Math.max(...memLimits) : (isSqlite ? null : 256000);
+      if (isPooled) {
+        const pool = getDatabasePool(this.docker);
+        container = await pool.acquire(language.id);
+      } else {
+        const isDatabase = language.id === 7 || language.id === 8 || language.id === 9;
+        const memLimits = executions.map(e => e.memory_limit).filter(m => m != null);
+        const effectiveMultiMemory = memLimits.length > 0 ? Math.max(...memLimits) : (isDatabase ? null : 256000);
 
-      const containerSubmission = {
-        language,
-        memory_limit: effectiveMultiMemory,
-        max_processes_and_or_threads: Math.max(...executions.map(e => e.max_processes_and_or_threads || 64), 64),
-        enable_network: submission.enable_network || false,
-      };
+        const containerSubmission = {
+          language,
+          memory_limit: effectiveMultiMemory,
+          max_processes_and_or_threads: Math.max(...executions.map(e => e.max_processes_and_or_threads || 64), 64),
+          enable_network: submission.enable_network || false,
+        };
 
-      container = await this.createContainer(containerSubmission);
-      await container.start();
+        container = await this.createContainer(containerSubmission);
+        await container.start();
+      }
 
       // 2. Write all files to /box
       for (const file of files) {
@@ -568,6 +571,9 @@ class DockerExecutor {
         } else if (language.id === 7) {
           // SQLite
           runCmd = `sqlite3 -header -column /box/db.sqlite < '${entryPoint}'`.trim();
+        } else if (language.id === 8 || language.id === 9) {
+          // PostgreSQL / MySQL
+          runCmd = `node /opt/runner/runner.js '/box/${entryPoint}' ${wall_time_limit}`.trim();
         } else {
           runCmd = `${language.run_cmd} ${argsStr}`.trim();
         }
@@ -619,11 +625,16 @@ class DockerExecutor {
       };
     } finally {
       if (container) {
-        try {
-          await container.stop({ t: 1 }).catch(() => {});
-          await container.remove({ force: true }).catch(() => {});
-        } catch (err) {
-          logger.warn({ err }, 'Failed to cleanup multi-file container');
+        if (isPooled) {
+          const pool = getDatabasePool(this.docker);
+          pool.release(container);
+        } else {
+          try {
+            await container.stop({ t: 1 }).catch(() => {});
+            await container.remove({ force: true }).catch(() => {});
+          } catch (err) {
+            logger.warn({ err }, 'Failed to cleanup multi-file container');
+          }
         }
       }
     }

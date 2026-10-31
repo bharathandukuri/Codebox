@@ -144,9 +144,9 @@ router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next)
 
     for (const data of runs) {
       const language = getLanguageById(data.language_id);
-      const isSqlite = data.language_id === 7;
+      const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
       const rootTimeLimit = data.time_limit ?? data.timelimit;
-      const defaultMemory = isSqlite ? null : config.execution.defaultMemoryLimit;
+      const defaultMemory = isDatabase ? null : config.execution.defaultMemoryLimit;
 
       const submission = {
         token: uuidv4(),
@@ -211,9 +211,9 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
     const fields = parseFields(req.query.fields);
 
     const language = getLanguageById(data.language_id);
-    const isSqlite = data.language_id === 7;
+    const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
     const rootTimeLimit = data.time_limit ?? data.timelimit;
-    const defaultMemory = isSqlite ? null : config.execution.defaultMemoryLimit;
+    const defaultMemory = isDatabase ? null : config.execution.defaultMemoryLimit;
 
     const submission = {
       token: uuidv4(),
@@ -287,11 +287,11 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
       const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
       const stdin = decodeIfNeeded(data.stdin, base64Encoded);
       const language = getLanguageById(data.language_id);
-      const isSqlite = data.language_id === 7;
+      const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
       const effectiveTimeLimit = data.time_limit ?? data.timelimit;
       const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
       const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
-      const memoryLimit = data.memory_limit ?? (isSqlite ? null : config.execution.defaultMemoryLimit);
+      const memoryLimit = data.memory_limit ?? (isDatabase ? null : config.execution.defaultMemoryLimit);
 
       const submission = {
         token: uuidv4(),
@@ -398,11 +398,11 @@ router.post('/', validateSubmission, async (req, res, next) => {
     const sourceCode = decodeIfNeeded(data.source_code, base64Encoded);
     const stdin = decodeIfNeeded(data.stdin, base64Encoded);
     const language = getLanguageById(data.language_id);
-    const isSqlite = data.language_id === 7;
+    const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
     const effectiveTimeLimit = data.time_limit ?? data.timelimit;
     const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
     const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
-    const memoryLimit = data.memory_limit ?? (isSqlite ? null : config.execution.defaultMemoryLimit);
+    const memoryLimit = data.memory_limit ?? (isDatabase ? null : config.execution.defaultMemoryLimit);
 
     const submission = {
       token: uuidv4(),

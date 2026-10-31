@@ -29,6 +29,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - EXECUTOR_TYPE=docker
       - WORKER_CONCURRENCY=4
+      - WORKER_SLOT_ID=worker-1
     depends_on:
       - redis
     volumes:

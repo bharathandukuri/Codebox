@@ -27,9 +27,11 @@ describe('CodeBox API', () => {
 
       assert.strictEqual(res.status, 200);
       assert(Array.isArray(data));
-      assert.strictEqual(data.length, 7);
+      assert.strictEqual(data.length, 9);
       assert(data.some(l => l.id === 5)); // Python (ID 5)
       assert(data.some(l => l.id === 7)); // SQLite (ID 7)
+      assert(data.some(l => l.id === 8)); // PostgreSQL (ID 8)
+      assert(data.some(l => l.id === 9)); // MySQL (ID 9)
     });
 
     it('should get language by ID', async () => {
@@ -360,6 +362,217 @@ describe('CodeBox API', () => {
       const data = await res.json();
       assert.strictEqual(data.status.id, 6);
       assert(data.compile_output.includes('Rejected'));
+    });
+  });
+
+  describe('PostgreSQL Execution (Language ID: 8)', () => {
+    it('should execute single-file PostgreSQL query', async () => {
+      const sql = "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT); INSERT INTO users (name) VALUES ('Alice'), ('Bob'); SELECT * FROM users;";
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: sql,
+          language_id: 8,
+          time_limit: 5,
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('Alice'));
+      assert(data.stdout.includes('Bob'));
+    });
+
+    it('should execute multi-file PostgreSQL project with state persistence', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 8,
+          time_limit: 5,
+          files: [
+            {
+              path: 'schema.sql',
+              content: "CREATE TABLE depts (id INT, dept_name TEXT); INSERT INTO depts VALUES (1, 'Engineering'), (2, 'Finance');",
+            },
+            {
+              path: 'query.sql',
+              content: "SELECT * FROM depts WHERE id = 1;",
+            },
+          ],
+          executions: [
+            { entryPoint: 'schema.sql' },
+            { entryPoint: 'query.sql' },
+          ],
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert.strictEqual(data.executions.length, 2);
+      assert.strictEqual(data.executions[0].status.id, 3);
+      assert.strictEqual(data.executions[1].status.id, 3);
+      assert(data.executions[1].stdout.includes('Engineering'));
+    });
+
+    it('should enforce statement_timeout on long-running PostgreSQL queries (TLE)', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 8,
+          time_limit: 1,
+          source_code: "SELECT pg_sleep(5);",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // Time Limit Exceeded
+    });
+
+    it('should reject dangerous PostgreSQL statements in code analyzer', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: '\\! whoami',
+          language_id: 8,
+        }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json();
+      assert.strictEqual(data.status.id, 6);
+      assert(data.compile_output.includes('Rejected'));
+    });
+
+    it('should enforce 1MB output cap on large SELECT result sets', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 8,
+          time_limit: 5,
+          source_code: "SELECT generate_series(1, 100000);",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('[Output limit of 1MB exceeded]'));
+    });
+  });
+
+  describe('MySQL Execution (Language ID: 9)', () => {
+    it('should execute single-file MySQL query', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: `
+            CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT);
+            INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25);
+            SELECT * FROM users ORDER BY id;
+          `,
+          language_id: 9,
+        }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json();
+      assert.strictEqual(data.status.id, 3); // Accepted
+      assert(data.stdout.includes('Alice'));
+      assert(data.stdout.includes('Bob'));
+      assert(data.stdout.includes('30'));
+    });
+
+    it('should execute multi-file MySQL project with state persistence', async () => {
+      const res = await fetch(`${BASE_URL}/submissions/multi?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 9,
+          files: [
+            {
+              path: 'schema.sql',
+              content: `
+                CREATE TABLE departments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50));
+                INSERT INTO departments (name) VALUES ('Engineering'), ('Design');
+              `,
+            },
+            {
+              path: 'query.sql',
+              content: 'SELECT * FROM departments ORDER BY id;',
+            },
+          ],
+          executions: [
+            { entryPoint: 'schema.sql' },
+            { entryPoint: 'query.sql' },
+          ],
+        }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json();
+      assert.strictEqual(data.status.id, 3);
+      assert.strictEqual(data.executions.length, 2);
+      assert.strictEqual(data.executions[0].status.id, 3);
+      assert.strictEqual(data.executions[1].status.id, 3);
+      assert(data.executions[1].stdout.includes('Engineering'));
+    });
+
+    it('should enforce statement_timeout on long-running MySQL queries (TLE)', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 9,
+          time_limit: 1,
+          source_code: "SELECT SLEEP(5);",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // Time Limit Exceeded
+    });
+
+    it('should reject dangerous MySQL statements in code analyzer', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: '\\! whoami',
+          language_id: 9,
+        }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json();
+      assert.strictEqual(data.status.id, 6);
+      assert(data.compile_output.includes('Rejected'));
+    });
+
+    it('should enforce 1MB output cap on large SELECT result sets', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 9,
+          time_limit: 5,
+          source_code: "SET SESSION cte_max_recursion_depth = 200000; WITH RECURSIVE cte AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM cte WHERE n < 150000) SELECT * FROM cte;",
+        }),
+      });
+      const data = await res.json();
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('[Output limit of 1MB exceeded]'));
     });
   });
 
