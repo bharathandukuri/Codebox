@@ -18,10 +18,10 @@ COPY my.cnf /etc/my.cnf
 RUN chmod 644 /etc/my.cnf
 
 # Initialize template database cluster under mysql (UID 999)
-RUN mkdir -p /var/lib/mysql/template /var/run/mysqld && \
-    chown -R mysql:mysql /var/lib/mysql /var/run/mysqld && \
+RUN mkdir -p /opt/mysql-template /var/run/mysqld && \
+    chown -R mysql:mysql /opt/mysql-template /var/run/mysqld && \
     mysqld --no-defaults \
-      --datadir=/var/lib/mysql/template \
+      --datadir=/opt/mysql-template \
       --socket=/tmp/mysqld.sock \
       --innodb-flush-method=O_DIRECT_NO_FSYNC \
       --innodb-doublewrite=0 \
@@ -30,8 +30,8 @@ RUN mkdir -p /var/lib/mysql/template /var/run/mysqld && \
       --innodb-redo-log-capacity=16M \
       --skip-networking \
       --initialize-insecure --user=mysql && \
-    mysqld --no-defaults \
-      --datadir=/var/lib/mysql/template \
+      mysqld --no-defaults \
+      --datadir=/opt/mysql-template \
       --socket=/tmp/mysqld.sock \
       --innodb-flush-method=O_DIRECT_NO_FSYNC \
       --innodb-doublewrite=0 \

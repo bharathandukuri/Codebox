@@ -466,6 +466,150 @@ describe('CodeBox API', () => {
       assert.strictEqual(data.status.id, 3);
       assert(data.stdout.includes('[Output limit of 1MB exceeded]'));
     });
+
+    it('should preserve duplicate column names in PostgreSQL output', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1 AS id, 2 AS id;',
+          language_id: 8,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('id') && data.stdout.includes('1') && data.stdout.includes('2'));
+    });
+
+    it('should format empty SELECT result set with headers in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1 AS num WHERE 1 = 0;',
+          language_id: 8,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('num') && data.stdout.includes('---'));
+    });
+
+    it('should render NULL as NULL in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "SELECT NULL AS null_col, 'val' AS not_null;",
+          language_id: 8,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('NULL'));
+      assert(data.stdout.includes('val'));
+    });
+
+    it('should handle multi-statement scripts in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: `
+            CREATE TABLE t_multi (x INT);
+            INSERT INTO t_multi VALUES (10), (20);
+            SELECT * FROM t_multi ORDER BY x;
+          `,
+          language_id: 8,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('10') && data.stdout.includes('20'));
+    });
+
+    it('should reject COPY ... PROGRAM attempts in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "COPY (SELECT 1) TO PROGRAM 'whoami';",
+          language_id: 8,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert(data.status.id === 6 || data.status.id === 11);
+    });
+
+    it('should enforce TLE on infinite loop recursive CTE in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'WITH RECURSIVE loop AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM loop) SELECT * FROM loop;',
+          language_id: 8,
+          time_limit: 1,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // TLE
+    });
+
+    it('should enforce TLE even when user resets statement_timeout=0 in PostgreSQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "SET statement_timeout = 0; SELECT pg_sleep(4);",
+          language_id: 8,
+          time_limit: 1,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // TLE via runner watchdog or host grace kill
+    });
+
+    it('should safely handle tmpfs fill attempts in PostgreSQL without leaking containers', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "CREATE TABLE fill (data TEXT); ALTER TABLE fill ALTER COLUMN data SET STORAGE EXTERNAL; INSERT INTO fill SELECT repeat('x', 10000000) FROM generate_series(1, 40);",
+          language_id: 8,
+          time_limit: 5,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert(data.status.id !== 3);
+    });
+
+    it('should handle 20-request burst on PostgreSQL (Language ID: 8)', async () => {
+      const burst = Array.from({ length: 20 }, (_, i) =>
+        fetch(`${BASE_URL}/submissions?wait=true`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            source_code: `SELECT ${i} AS burst_idx;`,
+            language_id: 8,
+          }),
+        }).then(r => r.json())
+      );
+
+      const results = await Promise.all(burst);
+      assert.strictEqual(results.length, 20);
+      for (let i = 0; i < 20; i++) {
+        assert.strictEqual(results[i].status.id, 3);
+        assert(results[i].stdout.includes(String(i)));
+      }
+    });
   });
 
   describe('MySQL Execution (Language ID: 9)', () => {
@@ -573,6 +717,133 @@ describe('CodeBox API', () => {
       assert.strictEqual(res.status, 201);
       assert.strictEqual(data.status.id, 3);
       assert(data.stdout.includes('[Output limit of 1MB exceeded]'));
+    });
+
+    it('should preserve duplicate column names in MySQL output', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1 AS id, 2 AS id;',
+          language_id: 9,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('id') && data.stdout.includes('1') && data.stdout.includes('2'));
+    });
+
+    it('should format empty SELECT result set with headers in MySQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1 AS num WHERE 1 = 0;',
+          language_id: 9,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('num') && data.stdout.includes('---'));
+    });
+
+    it('should render NULL as NULL in MySQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "SELECT NULL AS null_col, 'val' AS not_null;",
+          language_id: 9,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('NULL'));
+      assert(data.stdout.includes('val'));
+    });
+
+    it('should handle multi-statement scripts in MySQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: `
+            CREATE TABLE t_multi_m (x INT);
+            INSERT INTO t_multi_m VALUES (10), (20);
+            SELECT * FROM t_multi_m ORDER BY x;
+          `,
+          language_id: 9,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 3);
+      assert(data.stdout.includes('10') && data.stdout.includes('20'));
+    });
+
+    it('should enforce TLE on infinite loop in MySQL', async () => {
+      const res = await fetch(`${BASE_URL}/submissions?wait=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: "SELECT BENCHMARK(1000000000, MD5('test'));",
+          language_id: 9,
+          time_limit: 1,
+        }),
+      });
+      const data = await res.json();
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(data.status.id, 5); // TLE
+    });
+
+    it('should reject time_limit <= 0 with 422', async () => {
+      const res = await fetch(`${BASE_URL}/submissions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1;',
+          language_id: 9,
+          time_limit: 0,
+        }),
+      });
+      assert.strictEqual(res.status, 422);
+    });
+
+    it('should reject time_limit exceeding language max_time_limit with 422', async () => {
+      const res = await fetch(`${BASE_URL}/submissions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_code: 'SELECT 1;',
+          language_id: 9,
+          time_limit: 35,
+        }),
+      });
+      assert.strictEqual(res.status, 422);
+      const data = await res.json();
+      assert(data.message.includes('must be less than or equal to') || data.message.includes('exceeds maximum allowed'));
+    });
+
+    it('should reject multi-file submission exceeding total wall-time budget with 422', async () => {
+      const executions = Array.from({ length: 15 }, () => ({
+        entryPoint: 'query.sql',
+        time_limit: 5,
+      }));
+      const res = await fetch(`${BASE_URL}/submissions/multi`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          language_id: 9,
+          files: [{ path: 'query.sql', content: 'SELECT 1;' }],
+          executions,
+        }),
+      });
+      assert.strictEqual(res.status, 422);
+      const data = await res.json();
+      assert(data.message.includes('budget') && data.message.includes('exceeds'));
     });
   });
 

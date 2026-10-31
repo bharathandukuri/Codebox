@@ -115,14 +115,58 @@ function formatSubmission(submission, options = {}) {
   return formatSingleSubmission(submission, options);
 }
 
+class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValidationError';
+    this.statusCode = 422;
+  }
+}
+
+function resolveTimeLimits(data, language) {
+  const requestedTime = data.time_limit ?? data.timelimit;
+  const requestedCpu = data.cpu_time_limit;
+  const requestedWall = data.wall_time_limit;
+
+  const langMax = language?.max_time_limit ?? config.execution.maxWallTimeLimit;
+  const langDefault = language?.default_time_limit ?? config.execution.defaultWallTimeLimit;
+  const configMaxWall = config.execution.maxWallTimeLimit;
+  const configMaxCpu = config.execution.maxCpuTimeLimit;
+
+  const effectiveMaxWall = Math.min(langMax, configMaxWall);
+  const effectiveMaxCpu = Math.min(language?.max_time_limit ?? configMaxCpu, configMaxCpu);
+
+  if (requestedTime != null && requestedTime > effectiveMaxWall) {
+    throw new ValidationError(`time_limit (${requestedTime}s) exceeds maximum allowed for ${language?.name || 'language'} (${effectiveMaxWall}s)`);
+  }
+  if (requestedWall != null && requestedWall > effectiveMaxWall) {
+    throw new ValidationError(`wall_time_limit (${requestedWall}s) exceeds maximum allowed for ${language?.name || 'language'} (${effectiveMaxWall}s)`);
+  }
+  if (requestedCpu != null && requestedCpu > effectiveMaxCpu) {
+    throw new ValidationError(`cpu_time_limit (${requestedCpu}s) exceeds maximum allowed for ${language?.name || 'language'} (${effectiveMaxCpu}s)`);
+  }
+
+  const effectiveWall = Math.min(
+    requestedWall ?? requestedTime ?? langDefault,
+    effectiveMaxWall
+  );
+  const effectiveCpu = Math.min(
+    requestedCpu ?? requestedTime ?? language?.default_time_limit ?? config.execution.defaultCpuTimeLimit,
+    effectiveMaxCpu
+  );
+
+  return { effectiveWall, effectiveCpu };
+}
+
 /**
  * Wait for submission result with polling
  */
-async function waitForResult(token, maxWait = 30000) {
+async function waitForResult(token, maxWait = 15000) {
   const start = Date.now();
   const pollInterval = 100;
+  const cappedMaxWait = Math.min(maxWait, config.execution.maxWaitTimeout || 15000);
 
-  while (Date.now() - start < maxWait) {
+  while (Date.now() - start < cappedMaxWait) {
     const result = await getSubmission(token);
     if (result && result.status && result.status.id > 2) {
       return result;
@@ -141,12 +185,41 @@ router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next)
   try {
     const runs = req.validatedBody.runs || req.validatedBody.submissions;
     const results = [];
+    const maxTotalWallTime = config.execution.maxTotalWallTimeLimit || 60;
 
     for (const data of runs) {
       const language = getLanguageById(data.language_id);
       const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
       const rootTimeLimit = data.time_limit ?? data.timelimit;
       const defaultMemory = isDatabase ? null : config.execution.defaultMemoryLimit;
+
+      let totalWallBudget = 0;
+      const executions = data.executions.map(e => {
+        const { effectiveWall, effectiveCpu } = resolveTimeLimits({
+          time_limit: e.time_limit ?? e.timelimit ?? rootTimeLimit,
+          cpu_time_limit: e.cpu_time_limit,
+          wall_time_limit: e.wall_time_limit,
+        }, language);
+
+        totalWallBudget += effectiveWall;
+        const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
+        return {
+          entryPoint: e.entryPoint,
+          stdin: e.stdin || '',
+          args: e.args || [],
+          cpu_time_limit: effectiveCpu,
+          cpu_extra_time: e.cpu_extra_time ?? 1,
+          wall_time_limit: effectiveWall,
+          memory_limit: memoryLimit,
+          stack_limit: e.stack_limit,
+          max_processes_and_or_threads: e.max_processes_and_or_threads,
+          max_file_size: e.max_file_size,
+        };
+      });
+
+      if (totalWallBudget > maxTotalWallTime) {
+        throw new ValidationError(`Total wall-time budget (${totalWallBudget}s) exceeds limit of ${maxTotalWallTime}s`);
+      }
 
       const submission = {
         token: uuidv4(),
@@ -155,24 +228,7 @@ router.post('/multi/batch', validateBatchMultiSubmission, async (req, res, next)
         language,
         files: data.files,
         compileOrder: data.compileOrder || null,
-        executions: data.executions.map(e => {
-          const execTimeLimit = e.time_limit ?? e.timelimit ?? rootTimeLimit;
-          const cpuTimeLimit = execTimeLimit ?? e.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
-          const wallTimeLimit = execTimeLimit ?? e.wall_time_limit ?? config.execution.defaultWallTimeLimit;
-          const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
-          return {
-            entryPoint: e.entryPoint,
-            stdin: e.stdin || '',
-            args: e.args || [],
-            cpu_time_limit: cpuTimeLimit,
-            cpu_extra_time: e.cpu_extra_time || 1,
-            wall_time_limit: wallTimeLimit,
-            memory_limit: memoryLimit,
-            stack_limit: e.stack_limit,
-            max_processes_and_or_threads: e.max_processes_and_or_threads,
-            max_file_size: e.max_file_size,
-          };
-        }),
+        executions,
         compiler_options: sanitizeCompilerOptions(data.compiler_options),
         redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
         enable_network: data.enable_network,
@@ -214,6 +270,35 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
     const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
     const rootTimeLimit = data.time_limit ?? data.timelimit;
     const defaultMemory = isDatabase ? null : config.execution.defaultMemoryLimit;
+    const maxTotalWallTime = config.execution.maxTotalWallTimeLimit || 60;
+
+    let totalWallBudget = 0;
+    const executions = data.executions.map(e => {
+      const { effectiveWall, effectiveCpu } = resolveTimeLimits({
+        time_limit: e.time_limit ?? e.timelimit ?? rootTimeLimit,
+        cpu_time_limit: e.cpu_time_limit,
+        wall_time_limit: e.wall_time_limit,
+      }, language);
+
+      totalWallBudget += effectiveWall;
+      const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
+      return {
+        entryPoint: e.entryPoint,
+        stdin: e.stdin || '',
+        args: e.args || [],
+        cpu_time_limit: effectiveCpu,
+        cpu_extra_time: e.cpu_extra_time ?? 1,
+        wall_time_limit: effectiveWall,
+        memory_limit: memoryLimit,
+        stack_limit: e.stack_limit,
+        max_processes_and_or_threads: e.max_processes_and_or_threads,
+        max_file_size: e.max_file_size,
+      };
+    });
+
+    if (totalWallBudget > maxTotalWallTime) {
+      throw new ValidationError(`Total wall-time budget (${totalWallBudget}s) exceeds limit of ${maxTotalWallTime}s`);
+    }
 
     const submission = {
       token: uuidv4(),
@@ -222,24 +307,7 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
       language,
       files: data.files,
       compileOrder: data.compileOrder || null,
-      executions: data.executions.map(e => {
-        const execTimeLimit = e.time_limit ?? e.timelimit ?? rootTimeLimit;
-        const cpuTimeLimit = execTimeLimit ?? e.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
-        const wallTimeLimit = execTimeLimit ?? e.wall_time_limit ?? config.execution.defaultWallTimeLimit;
-        const memoryLimit = e.memory_limit ?? data.memory_limit ?? defaultMemory;
-        return {
-          entryPoint: e.entryPoint,
-          stdin: e.stdin || '',
-          args: e.args || [],
-          cpu_time_limit: cpuTimeLimit,
-          cpu_extra_time: e.cpu_extra_time || 1,
-          wall_time_limit: wallTimeLimit,
-          memory_limit: memoryLimit,
-          stack_limit: e.stack_limit,
-          max_processes_and_or_threads: e.max_processes_and_or_threads,
-          max_file_size: e.max_file_size,
-        };
-      }),
+      executions,
       compiler_options: sanitizeCompilerOptions(data.compiler_options),
       redirect_stderr_to_stdout: data.redirect_stderr_to_stdout,
       enable_network: data.enable_network,
@@ -263,7 +331,11 @@ router.post('/multi', validateMultiSubmission, async (req, res, next) => {
 
     if (wait) {
       const result = await waitForResult(submission.token);
-      res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
+      if (result && result.status && result.status.id > 2) {
+        res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
+      } else {
+        res.status(201).json({ token: submission.token });
+      }
     } else {
       res.status(201).json({ token: submission.token });
     }
@@ -288,9 +360,7 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
       const stdin = decodeIfNeeded(data.stdin, base64Encoded);
       const language = getLanguageById(data.language_id);
       const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
-      const effectiveTimeLimit = data.time_limit ?? data.timelimit;
-      const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
-      const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+      const { effectiveWall, effectiveCpu } = resolveTimeLimits(data, language);
       const memoryLimit = data.memory_limit ?? (isDatabase ? null : config.execution.defaultMemoryLimit);
 
       const submission = {
@@ -300,9 +370,9 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
         language_id: data.language_id,
         language,
         stdin: stdin || '',
-        cpu_time_limit: cpuTimeLimit,
-        cpu_extra_time: data.cpu_extra_time || 1,
-        wall_time_limit: wallTimeLimit,
+        cpu_time_limit: effectiveCpu,
+        cpu_extra_time: data.cpu_extra_time ?? 1,
+        wall_time_limit: effectiveWall,
         memory_limit: memoryLimit,
         stack_limit: data.stack_limit,
         max_processes_and_or_threads: data.max_processes_and_or_threads,
@@ -399,9 +469,7 @@ router.post('/', validateSubmission, async (req, res, next) => {
     const stdin = decodeIfNeeded(data.stdin, base64Encoded);
     const language = getLanguageById(data.language_id);
     const isDatabase = data.language_id === 7 || data.language_id === 8 || data.language_id === 9;
-    const effectiveTimeLimit = data.time_limit ?? data.timelimit;
-    const cpuTimeLimit = effectiveTimeLimit ?? data.cpu_time_limit ?? config.execution.defaultCpuTimeLimit;
-    const wallTimeLimit = effectiveTimeLimit ?? data.wall_time_limit ?? config.execution.defaultWallTimeLimit;
+    const { effectiveWall, effectiveCpu } = resolveTimeLimits(data, language);
     const memoryLimit = data.memory_limit ?? (isDatabase ? null : config.execution.defaultMemoryLimit);
 
     const submission = {
@@ -411,9 +479,9 @@ router.post('/', validateSubmission, async (req, res, next) => {
       language_id: data.language_id,
       language,
       stdin: stdin || '',
-      cpu_time_limit: cpuTimeLimit,
-      cpu_extra_time: data.cpu_extra_time || 1,
-      wall_time_limit: wallTimeLimit,
+      cpu_time_limit: effectiveCpu,
+      cpu_extra_time: data.cpu_extra_time ?? 1,
+      wall_time_limit: effectiveWall,
       memory_limit: memoryLimit,
       stack_limit: data.stack_limit,
       max_processes_and_or_threads: data.max_processes_and_or_threads,
@@ -448,7 +516,11 @@ router.post('/', validateSubmission, async (req, res, next) => {
 
     if (wait) {
       const result = await waitForResult(submission.token);
-      res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
+      if (result && result.status && result.status.id > 2) {
+        res.status(201).json(formatSubmission(result, { base64Encoded, fields }));
+      } else {
+        res.status(201).json({ token: submission.token });
+      }
     } else {
       res.status(201).json({ token: submission.token });
     }

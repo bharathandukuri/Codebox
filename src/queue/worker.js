@@ -8,7 +8,7 @@ import { getStatusById } from '../languages/index.js';
 import { getDatabasePool } from '../executor/pool/DatabaseContainerPool.js';
 
 let redis = null;
-let worker = null;
+let activeWorkers = [];
 
 /**
  * Update submission result in Redis
@@ -111,56 +111,91 @@ export async function startWorker() {
     logger.info('Worker connected to Redis');
   });
 
-  worker = new Worker('submissions', processJob, {
-    connection: redis,
-    concurrency: config.worker.concurrency,
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 1000 },
-  });
+  const workerType = process.env.WORKER_TYPE;
+  const queueNames = [];
 
-  worker.on('completed', (job, result) => {
-    logger.debug({
-      event: 'worker_job_completed',
-      jobId: job.id,
-      token: job.data.token,
+  if (workerType === 'db') {
+    queueNames.push('submissions-db');
+  } else if (workerType === 'isolate' || workerType === 'code') {
+    queueNames.push('submissions');
+  } else {
+    // Standalone / default mode: consume from both queues
+    queueNames.push('submissions', 'submissions-db');
+  }
+
+  activeWorkers = queueNames.map((queueName) => {
+    const w = new Worker(queueName, processJob, {
+      connection: redis,
+      concurrency: config.worker.concurrency,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 1000 },
     });
-  });
 
-  worker.on('failed', (job, err) => {
-    logger.error({
-      event: 'worker_job_failed',
-      jobId: job?.id,
-      token: job?.data?.token,
-      error: err.message,
+    w.on('completed', (job, result) => {
+      logger.debug({
+        event: 'worker_job_completed',
+        queue: queueName,
+        jobId: job.id,
+        token: job.data.token,
+      });
     });
-  });
 
-  worker.on('error', (err) => {
-    logger.error({ err }, 'Worker error');
+    w.on('failed', (job, err) => {
+      logger.error({
+        event: 'worker_job_failed',
+        queue: queueName,
+        jobId: job?.id,
+        token: job?.data?.token,
+        error: err.message,
+      });
+    });
+
+    w.on('error', (err) => {
+      logger.error({ err, queue: queueName }, 'Worker error');
+    });
+
+    return w;
   });
 
   logger.info({
     event: 'worker_started',
+    workerType: workerType || 'all',
+    queues: queueNames,
     concurrency: config.worker.concurrency,
   });
 
-  // Pre-warm database pool for worker
-  try {
-    const pool = getDatabasePool();
-    pool.warmPool().catch(err => {
-      logger.error({ event: 'pool_warmup_error', error: err.message });
-    });
-  } catch (poolErr) {
-    logger.warn({ event: 'pool_init_skipped', message: poolErr.message });
+  // Pre-warm database pool for DB or standalone worker
+  if (workerType !== 'isolate' && workerType !== 'code') {
+    try {
+      const pool = getDatabasePool();
+      pool.warmPool().catch((err) => {
+        logger.error({ event: 'pool_warmup_error', error: err.message });
+      });
+    } catch (poolErr) {
+      logger.warn({ event: 'pool_init_skipped', message: poolErr.message });
+    }
   }
 
-  return worker;
+  return activeWorkers[0];
 }
 
 /**
- * Stop the worker gracefully
+ * Stop the worker gracefully:
+ * 1. worker.close() first (drain active jobs)
+ * 2. pool.shutdown()
+ * 3. redis.quit()
  */
 export async function stopWorker() {
+  for (const w of activeWorkers) {
+    try {
+      await w.close();
+      logger.info('Worker drained and closed');
+    } catch (err) {
+      logger.warn({ event: 'worker_close_error', error: err.message });
+    }
+  }
+  activeWorkers = [];
+
   try {
     const pool = getDatabasePool();
     await pool.shutdown();
@@ -168,17 +203,13 @@ export async function stopWorker() {
     logger.warn({ event: 'pool_shutdown_error', message: poolErr.message });
   }
 
-  if (worker) {
-    await worker.close();
-    logger.info('Worker stopped');
-  }
   if (redis) {
     await redis.quit();
   }
 }
 
 // Run as main script
-if (process.argv[1].endsWith('worker.js')) {
+if (process.argv[1] && process.argv[1].endsWith('worker.js')) {
   startWorker().catch((err) => {
     logger.error({ err }, 'Failed to start worker');
     process.exit(1);

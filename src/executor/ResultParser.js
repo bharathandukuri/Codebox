@@ -14,7 +14,7 @@ class ResultParser {
     let status;
     let exitSignal = null;
 
-    if (timedOut) {
+    if (timedOut || exitCode === 124) {
       status = getStatusById(5); // Time Limit Exceeded
     } else if (exitCode === 0) {
       status = getStatusById(3); // Accepted

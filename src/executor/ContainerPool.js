@@ -153,7 +153,7 @@ class ContainerPool {
   async destroy(container) {
     try {
       await container.stop({ t: 0 }).catch(() => {});
-      await container.remove({ force: true });
+      await container.remove({ force: true, v: true });
     } catch (error) {
       logger.warn({ event: 'pool_destroy_failed', error: error.message });
     }

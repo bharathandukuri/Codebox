@@ -13,11 +13,11 @@ const runSchema = Joi.object({
     return value;
   }),
   stdin: Joi.string().allow('', null).default(''),
-  time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-  timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-  cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
+  time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+  timelimit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+  cpu_time_limit: Joi.number().greater(0).max(config.execution.maxCpuTimeLimit).allow(null),
   cpu_extra_time: Joi.number().min(0).max(5).default(1),
-  wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  wall_time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
   memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
   stack_limit: Joi.number().min(0).max(config.execution.defaultStackLimit)
     .default(config.execution.defaultStackLimit),
@@ -74,10 +74,10 @@ const multiFileRunSchema = Joi.object({
     }
     return value;
   }),
-  time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-  timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-  cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
-  wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+  time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+  timelimit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+  cpu_time_limit: Joi.number().greater(0).max(config.execution.maxCpuTimeLimit).allow(null),
+  wall_time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
   memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
   files: Joi.array().items(
     Joi.object({
@@ -103,11 +103,11 @@ const multiFileRunSchema = Joi.object({
       entryPoint: Joi.string().required(),
       stdin: Joi.string().allow('', null).default(''),
       args: Joi.array().items(Joi.string()).default([]),
-      time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-      timelimit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
-      cpu_time_limit: Joi.number().min(0).max(config.execution.maxCpuTimeLimit).allow(null),
+      time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+      timelimit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
+      cpu_time_limit: Joi.number().greater(0).max(config.execution.maxCpuTimeLimit).allow(null),
       cpu_extra_time: Joi.number().min(0).max(5).default(1),
-      wall_time_limit: Joi.number().min(0).max(config.execution.maxWallTimeLimit).allow(null),
+      wall_time_limit: Joi.number().greater(0).max(config.execution.maxWallTimeLimit).allow(null),
       memory_limit: Joi.number().min(0).max(config.execution.maxMemoryLimit).allow(null),
       stack_limit: Joi.number().min(0).max(config.execution.defaultStackLimit)
         .default(config.execution.defaultStackLimit),
@@ -115,7 +115,7 @@ const multiFileRunSchema = Joi.object({
         .default(config.execution.maxProcesses),
       max_file_size: Joi.number().min(0).max(4096).default(1024),
     })
-  ).min(1).required(),
+  ).min(1).max(20).required(),
   compiler_options: Joi.string().allow('', null).default(null),
   redirect_stderr_to_stdout: Joi.boolean().default(false),
   enable_network: Joi.any().strip().default(false),

@@ -24,72 +24,99 @@ class DockerExecutor {
     let container = null;
     const isPooled = (language.id === 8 || language.id === 9);
 
+    const compileBudget = language.compile_cmd ? (submission.cpu_time_limit + (submission.cpu_extra_time ?? 1)) : 0;
+    const wallBudget = submission.wall_time_limit || 5;
+    const acquireBudget = 15;
+    const graceBudget = isPooled ? 3 : 5;
+    const overallDeadlineMs = (acquireBudget + compileBudget + wallBudget + graceBudget) * 1000;
+
+    let deadlineTimeout = null;
+    let deadlineExpired = false;
+
+    const deadlinePromise = new Promise((_, reject) => {
+      deadlineTimeout = setTimeout(() => {
+        deadlineExpired = true;
+        reject(new Error(`Overall job deadline exceeded (${overallDeadlineMs / 1000}s)`));
+      }, overallDeadlineMs);
+    });
+
     try {
-      if (isPooled) {
-        const pool = getDatabasePool(this.docker);
-        container = await pool.acquire(language.id);
-      } else {
-        container = await this.createContainer(submission);
-        await container.start();
-      }
+      const doExecute = async () => {
+        if (isPooled) {
+          const pool = getDatabasePool(this.docker);
+          container = await pool.acquire(language.id);
+        } else {
+          container = await this.createContainer(submission);
+          await container.start();
+        }
 
-      if (language.id === MULTI_FILE_LANGUAGE_ID) {
-        // Multi-file program: extract ZIP, then run compile/run scripts
-        await this.copyAdditionalFiles(container, submission);
-        return await this.executeMultiFile(container, submission);
-      }
+        if (deadlineExpired) {
+          throw new Error('Overall job deadline exceeded');
+        }
 
-      // Copy source code to container
-      await this.copySourceCode(container, submission);
+        if (language.id === MULTI_FILE_LANGUAGE_ID) {
+          // Multi-file program: extract ZIP, then run compile/run scripts
+          await this.copyAdditionalFiles(container, submission);
+          return await this.executeMultiFile(container, submission);
+        }
 
-      // Copy additional files if provided
-      if (submission.additional_files) {
-        await this.copyAdditionalFiles(container, submission);
-      }
+        // Copy source code to container
+        await this.copySourceCode(container, submission);
 
-      // If compiled language, run compilation first
-      if (language.compile_cmd) {
-        const compileResult = await this.runCommand(
+        // Copy additional files if provided
+        if (submission.additional_files) {
+          await this.copyAdditionalFiles(container, submission);
+        }
+
+        // If compiled language, run compilation first
+        if (language.compile_cmd) {
+          const compileResult = await this.runCommand(
+            container,
+            language.compile_cmd,
+            { max_file_size: submission.max_file_size },
+            submission.cpu_time_limit + (submission.cpu_extra_time ?? 1),
+            ''
+          );
+
+          if (compileResult.exitCode !== 0) {
+            return {
+              status: getStatusById(6), // Compilation Error
+              compile_output: compileResult.stderr || compileResult.stdout,
+              time: null,
+              wall_time: null,
+              memory: null,
+              stdout: null,
+              stderr: null,
+              exit_code: compileResult.exitCode,
+              exit_signal: null,
+            };
+          }
+        }
+
+        // Run the program
+        let runCmd = '';
+        if (language.id === 8 || language.id === 9) {
+          runCmd = `node /opt/runner/runner.js '/box/${language.source_file}' ${submission.wall_time_limit}`;
+        } else {
+          runCmd = this.buildRunCommand(language.run_cmd, submission.command_line_arguments);
+        }
+
+        const result = await this.runCommand(
           container,
-          language.compile_cmd,
-          submission.compiler_options,
-          submission.cpu_time_limit + submission.cpu_extra_time,
-          ''
+          runCmd,
+          {
+            isDatabase: isPooled,
+            max_file_size: submission.max_file_size,
+          },
+          submission.wall_time_limit,
+          submission.stdin
         );
 
-        if (compileResult.exitCode !== 0) {
-          return {
-            status: getStatusById(6), // Compilation Error
-            compile_output: compileResult.stderr || compileResult.stdout,
-            time: null,
-            wall_time: null,
-            memory: null,
-            stdout: null,
-            stderr: null,
-            exit_code: compileResult.exitCode,
-            exit_signal: null,
-          };
-        }
-      }
+        // Parse and return result
+        return this.resultParser.parse(result, submission);
+      };
 
-      // Run the program
-      let runCmd = '';
-      if (language.id === 8 || language.id === 9) {
-        runCmd = `node /opt/runner/runner.js '/box/${language.source_file}' ${submission.wall_time_limit}`;
-      } else {
-        runCmd = this.buildRunCommand(language.run_cmd, submission.command_line_arguments);
-      }
-
-      const result = await this.runCommand(
-        container,
-        runCmd,
-        null,
-        submission.wall_time_limit,
-        submission.stdin
-      );
-
-      // Parse and return result
-      return this.resultParser.parse(result, submission);
+      return await Promise.race([doExecute(), deadlinePromise]);
     } catch (error) {
       logger.error({
         event: 'execution_error',
@@ -97,8 +124,9 @@ class DockerExecutor {
         error: error.message,
       });
 
+      const isTle = error.message.includes('deadline exceeded');
       return {
-        status: getStatusById(13), // Internal Error
+        status: getStatusById(isTle ? 5 : 13),
         message: error.message,
         time: null,
         wall_time: null,
@@ -106,10 +134,11 @@ class DockerExecutor {
         stdout: null,
         stderr: null,
         compile_output: null,
-        exit_code: null,
+        exit_code: isTle ? 124 : null,
         exit_signal: null,
       };
     } finally {
+      if (deadlineTimeout) clearTimeout(deadlineTimeout);
       // Cleanup container
       if (container) {
         if (isPooled) {
@@ -118,7 +147,7 @@ class DockerExecutor {
         } else {
           try {
             await container.stop({ t: 1 }).catch(() => {});
-            await container.remove({ force: true });
+            await container.remove({ force: true, v: true }).catch(() => {});
           } catch (err) {
             logger.warn({ err }, 'Failed to cleanup container');
           }
@@ -352,6 +381,9 @@ class DockerExecutor {
    */
   async runCommand(container, command, extraOptions, timeoutSecs, stdin) {
     const startTime = Date.now();
+    const isDatabase = typeof extraOptions === 'object' && extraOptions?.isDatabase;
+    const graceSecs = isDatabase ? 1.5 : 0;
+    const maxBytes = ((typeof extraOptions === 'object' && extraOptions?.max_file_size) ? extraOptions.max_file_size * 1024 : 1024 * 1024);
 
     // Create exec instance
     const exec = await container.exec({
@@ -364,7 +396,7 @@ class DockerExecutor {
     });
 
     return new Promise((resolve, reject) => {
-      const timeoutMs = timeoutSecs * 1000;
+      const timeoutMs = (timeoutSecs + graceSecs) * 1000;
       let stdout = '';
       let stderr = '';
       let timedOut = false;
@@ -390,11 +422,26 @@ class DockerExecutor {
         // Demux stdout and stderr using Dockerode modem
         const stdoutChunks = [];
         const stderrChunks = [];
+        let totalStdoutBytes = 0;
+        let totalStderrBytes = 0;
         const stdoutStream = new PassThrough();
         const stderrStream = new PassThrough();
 
-        stdoutStream.on('data', (chunk) => stdoutChunks.push(chunk));
-        stderrStream.on('data', (chunk) => stderrChunks.push(chunk));
+        stdoutStream.on('data', (chunk) => {
+          if (totalStdoutBytes < maxBytes) {
+            const take = Math.min(chunk.length, maxBytes - totalStdoutBytes);
+            stdoutChunks.push(chunk.subarray(0, take));
+            totalStdoutBytes += take;
+          }
+        });
+
+        stderrStream.on('data', (chunk) => {
+          if (totalStderrBytes < maxBytes) {
+            const take = Math.min(chunk.length, maxBytes - totalStderrBytes);
+            stderrChunks.push(chunk.subarray(0, take));
+            totalStderrBytes += take;
+          }
+        });
 
         this.docker.modem.demuxStream(stream, stdoutStream, stderrStream);
 
@@ -578,7 +625,13 @@ class DockerExecutor {
           runCmd = `${language.run_cmd} ${argsStr}`.trim();
         }
 
-        const runResult = await this.runCommand(container, runCmd, null, wall_time_limit, stdin);
+        const runResult = await this.runCommand(
+          container,
+          runCmd,
+          { isDatabase: isPooled, max_file_size: execConfig.max_file_size },
+          wall_time_limit,
+          stdin
+        );
         const parsed = this.resultParser.parse(runResult, {
           redirect_stderr_to_stdout: submission.redirect_stderr_to_stdout,
         });
@@ -631,7 +684,7 @@ class DockerExecutor {
         } else {
           try {
             await container.stop({ t: 1 }).catch(() => {});
-            await container.remove({ force: true }).catch(() => {});
+            await container.remove({ force: true, v: true }).catch(() => {});
           } catch (err) {
             logger.warn({ err }, 'Failed to cleanup multi-file container');
           }

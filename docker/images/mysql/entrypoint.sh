@@ -3,7 +3,7 @@ set -e
 
 # Setup working directory, socket dir, and cluster in tmpfs (/box)
 mkdir -p /box/data /box/socket
-cp -a /var/lib/mysql/template/* /box/data/
+cp -a /opt/mysql-template/* /box/data/
 chmod 700 /box/data
 chmod 1777 /box/socket
 

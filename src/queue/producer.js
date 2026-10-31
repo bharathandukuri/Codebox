@@ -6,9 +6,13 @@ import logger from '../utils/logger.js';
 // Redis connection
 let redis = null;
 let submissionQueue = null;
+let dbSubmissionQueue = null;
+
+export const SUBMISSIONS_QUEUE = 'submissions';
+export const DB_SUBMISSIONS_QUEUE = 'submissions-db';
 
 /**
- * Initialize Redis and BullMQ queue
+ * Initialize Redis and BullMQ queues
  */
 export async function initializeQueue() {
   redis = new Redis(config.redis.url, {
@@ -23,24 +27,31 @@ export async function initializeQueue() {
     logger.info('Connected to Redis');
   });
 
-  submissionQueue = new Queue('submissions', {
-    connection: redis,
-    defaultJobOptions: {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 1000,
-      },
-      removeOnComplete: {
-        count: 100,
-      },
-      removeOnFail: {
-        count: 1000,
-      },
+  const defaultJobOptions = {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 1000,
     },
+    removeOnComplete: {
+      count: 100,
+    },
+    removeOnFail: {
+      count: 1000,
+    },
+  };
+
+  submissionQueue = new Queue(SUBMISSIONS_QUEUE, {
+    connection: redis,
+    defaultJobOptions,
   });
 
-  logger.info('BullMQ queue initialized');
+  dbSubmissionQueue = new Queue(DB_SUBMISSIONS_QUEUE, {
+    connection: redis,
+    defaultJobOptions,
+  });
+
+  logger.info('BullMQ queues initialized');
   return submissionQueue;
 }
 
@@ -54,7 +65,10 @@ export function getRedis() {
 /**
  * Get submission queue
  */
-export function getQueue() {
+export function getQueue(languageId) {
+  if (languageId === 8 || languageId === 9) {
+    return dbSubmissionQueue || submissionQueue;
+  }
   return submissionQueue;
 }
 
@@ -73,14 +87,18 @@ export async function addSubmission(submission) {
     JSON.stringify(submission)
   );
 
-  // Add job to queue
-  await submissionQueue.add('execute', submission, {
+  const isDb = submission.language_id === 8 || submission.language_id === 9;
+  const targetQueue = (isDb && dbSubmissionQueue) ? dbSubmissionQueue : submissionQueue;
+
+  // Add job to target queue
+  await targetQueue.add('execute', submission, {
     jobId: submission.token,
   });
 
   logger.debug({
     event: 'submission_queued',
     token: submission.token,
+    queue: isDb ? DB_SUBMISSIONS_QUEUE : SUBMISSIONS_QUEUE,
   });
 
   return submission;
@@ -145,20 +163,34 @@ export async function getQueueStats() {
     return { submissions: { total: 0, in_queue: 0, processing: 0, completed: 0 } };
   }
 
-  const [waiting, active, completed, failed] = await Promise.all([
-    submissionQueue.getWaitingCount(),
-    submissionQueue.getActiveCount(),
-    submissionQueue.getCompletedCount(),
-    submissionQueue.getFailedCount(),
-  ]);
+  const queues = [submissionQueue];
+  if (dbSubmissionQueue) queues.push(dbSubmissionQueue);
+
+  let totalWaiting = 0;
+  let totalActive = 0;
+  let totalCompleted = 0;
+  let totalFailed = 0;
+
+  for (const q of queues) {
+    const [waiting, active, completed, failed] = await Promise.all([
+      q.getWaitingCount(),
+      q.getActiveCount(),
+      q.getCompletedCount(),
+      q.getFailedCount(),
+    ]);
+    totalWaiting += waiting;
+    totalActive += active;
+    totalCompleted += completed;
+    totalFailed += failed;
+  }
 
   return {
     submissions: {
-      total: waiting + active + completed + failed,
-      in_queue: waiting,
-      processing: active,
-      completed: completed,
-      failed: failed,
+      total: totalWaiting + totalActive + totalCompleted + totalFailed,
+      in_queue: totalWaiting,
+      processing: totalActive,
+      completed: totalCompleted,
+      failed: totalFailed,
     },
   };
 }
@@ -171,12 +203,20 @@ export async function getWorkerStats() {
     return [];
   }
 
-  const workers = await submissionQueue.getWorkers();
-  return workers.map(w => ({
-    id: w.id,
-    name: w.name,
-    active: true,
-  }));
+  const queues = [submissionQueue];
+  if (dbSubmissionQueue) queues.push(dbSubmissionQueue);
+
+  const allWorkers = [];
+  for (const q of queues) {
+    const workers = await q.getWorkers();
+    allWorkers.push(...workers.map(w => ({
+      id: w.id,
+      name: w.name,
+      active: true,
+    })));
+  }
+
+  return allWorkers;
 }
 
 /**
@@ -185,6 +225,9 @@ export async function getWorkerStats() {
 export async function closeQueue() {
   if (submissionQueue) {
     await submissionQueue.close();
+  }
+  if (dbSubmissionQueue) {
+    await dbSubmissionQueue.close();
   }
   if (redis) {
     await redis.quit();

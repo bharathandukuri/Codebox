@@ -56,6 +56,7 @@ services:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
       - EXECUTOR_TYPE=isolate
+      - WORKER_TYPE=isolate
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
       - DEFAULT_MEMORY_LIMIT=${DEFAULT_MEMORY_LIMIT:-256000}
       - MAX_MEMORY_LIMIT=${MAX_MEMORY_LIMIT:-512000}
@@ -69,6 +70,29 @@ services:
           # Must not exceed the host's vCPU count or Docker refuses to start it.
           cpus: '${WORKER_CPUS:-1.5}'
           memory: ${WORKER_MEMORY:-4G}
+
+  worker-db:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: node src/queue/worker.js
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - EXECUTOR_TYPE=docker
+      - WORKER_TYPE=db
+      - WORKER_CONCURRENCY=${WORKER_DB_CONCURRENCY:-2}
+      - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_DB_CPUS:-1.5}'
+          memory: ${WORKER_DB_MEMORY:-2G}
 
   redis:
     image: redis:7-alpine

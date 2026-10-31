@@ -8,6 +8,14 @@ import IsolateExecutor from './IsolateExecutor.js';
 
 let executorInstance = null;
 let executorType = null;
+let dockerExecutorInstance = null;
+
+function getDockerExecutor() {
+  if (!dockerExecutorInstance) {
+    dockerExecutorInstance = new DockerExecutor();
+  }
+  return dockerExecutorInstance;
+}
 
 /**
  * Detect if isolate is available on the system
@@ -59,8 +67,13 @@ function isFirecrackerAvailable() {
 /**
  * Get the appropriate executor based on configuration and system capabilities.
  * Priority: isolate > firecracker > docker
+ * Languages 8 and 9 (PostgreSQL, MySQL) must always use DockerExecutor.
  */
-export function getExecutor() {
+export function getExecutor(languageId) {
+  if (languageId === 8 || languageId === 9) {
+    return getDockerExecutor();
+  }
+
   if (executorInstance) {
     return executorInstance;
   }
@@ -112,7 +125,11 @@ export function getExecutor() {
 /**
  * Get the current executor type
  */
-export function getExecutorType() {
+export function getExecutorType(languageId) {
+  if (languageId === 8 || languageId === 9) {
+    return 'docker';
+  }
+
   if (!executorType) {
     getExecutor();
   }

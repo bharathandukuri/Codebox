@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   api:
     build:
@@ -16,7 +14,6 @@ services:
       - redis
     volumes:
       - ./src:/app/src:ro
-      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   worker:
@@ -29,7 +26,6 @@ services:
       - REDIS_URL=redis://redis:6379
       - EXECUTOR_TYPE=docker
       - WORKER_CONCURRENCY=4
-      - WORKER_SLOT_ID=worker-1
     depends_on:
       - redis
     volumes:
@@ -39,8 +35,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes

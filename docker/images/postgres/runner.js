@@ -4,20 +4,65 @@ const fs = require('fs');
 const { Client } = pg;
 
 const MAX_OUTPUT_BYTES = 1024 * 1024; // 1MB limit
+const OVERFLOW_MARKER = '\n[Output limit of 1MB exceeded]\n';
+
+function capOutput(output) {
+  if (Buffer.byteLength(output, 'utf8') <= MAX_OUTPUT_BYTES) {
+    return output;
+  }
+  const maxContentBytes = MAX_OUTPUT_BYTES - Buffer.byteLength(OVERFLOW_MARKER, 'utf8');
+  const buf = Buffer.from(output, 'utf8').subarray(0, maxContentBytes);
+  return buf.toString('utf8') + OVERFLOW_MARKER;
+}
+
+function formatTable(colNames, rows) {
+  if (!colNames || colNames.length === 0) return '';
+
+  const colWidths = colNames.map(name => (name ? String(name).length : 0));
+
+  const stringRows = rows.map(row => {
+    return colNames.map((_, idx) => {
+      const val = row[idx];
+      let strVal = (val === null || val === undefined) ? 'NULL' : (val instanceof Date ? val.toISOString() : String(val));
+      if (strVal.length > 50) {
+        strVal = strVal.slice(0, 50); // Consistent cell truncation
+      }
+      if (strVal.length > colWidths[idx]) {
+        colWidths[idx] = strVal.length;
+      }
+      return strVal;
+    });
+  });
+
+  const header = colNames.map((col, idx) => String(col).padEnd(colWidths[idx])).join('  ');
+  const separator = colWidths.map(w => '-'.repeat(Math.max(w, 1))).join('  ');
+  let table = header + '\n' + separator + '\n';
+
+  for (const row of stringRows) {
+    const rowStr = row.map((cell, idx) => cell.padEnd(colWidths[idx])).join('  ');
+    table += rowStr + '\n';
+  }
+
+  return table;
+}
 
 async function main() {
   const filePath = process.argv[2];
   const timeoutSecs = parseFloat(process.argv[3]) || 5;
 
   if (!filePath || !fs.existsSync(filePath)) {
-    process.stderr.write(`Error: SQL file not found: ${filePath}\n`);
-    process.exit(1);
+    process.stderr.write(`Error: SQL file not found: ${filePath}\n`, () => {
+      process.exit(1);
+    });
+    return;
   }
 
   const sql = fs.readFileSync(filePath, 'utf-8');
   if (!sql.trim()) {
     process.exit(0);
   }
+
+  const timeoutMs = Math.max(Math.floor(timeoutSecs * 1000), 500);
 
   const client = new Client({
     user: 'runner',
@@ -27,15 +72,25 @@ async function main() {
     connectionTimeoutMillis: 3000,
   });
 
+  // Host/runner wall-clock watchdog (exit code 124 on timeout)
+  const wallTimer = setTimeout(() => {
+    client.end().catch(() => {});
+    process.stderr.write('canceling statement due to statement timeout\n', () => {
+      process.exit(124);
+    });
+  }, timeoutMs);
+
   try {
     await client.connect();
 
-    // Set statement timeout in milliseconds
-    const timeoutMs = Math.max(Math.floor(timeoutSecs * 1000), 500);
+    // Set PostgreSQL statement timeout in milliseconds
     await client.query(`SET statement_timeout = ${timeoutMs};`);
 
-    // Execute multi-statement SQL text
-    const res = await client.query(sql);
+    // Execute multi-statement SQL text with rowMode: 'array'
+    // Preserves duplicate column names and accurate indices
+    const res = await client.query({ text: sql, rowMode: 'array' });
+
+    clearTimeout(wallTimer);
 
     // Format output
     let output = '';
@@ -44,42 +99,10 @@ async function main() {
     for (const r of results) {
       if (!r) continue;
 
-      if (r.fields && r.fields.length > 0 && r.rows) {
-        // Tabular output (like psql -A / psql -c)
+      if (r.fields && r.fields.length > 0) {
+        // Tabular output (preserves duplicate column names, prints header for 0 rows, NULL as NULL)
         const colNames = r.fields.map(f => f.name);
-        const colWidths = colNames.map(name => name.length);
-
-        // Calculate max column widths
-        const stringRows = r.rows.map(row => {
-          return colNames.map((col, idx) => {
-            const val = row[col];
-            const strVal = val === null ? '' : (val instanceof Date ? val.toISOString() : String(val));
-            if (strVal.length > colWidths[idx]) {
-              colWidths[idx] = Math.min(strVal.length, 50); // Cap column width at 50 for formatting
-            }
-            return strVal;
-          });
-        });
-
-        // Format header
-        const header = colNames.map((col, idx) => col.padEnd(colWidths[idx])).join('  ');
-        const separator = colWidths.map(w => '-'.repeat(w)).join('  ');
-        output += header + '\n' + separator + '\n';
-
-        // Format rows
-        for (const row of stringRows) {
-          const rowStr = row.map((cell, idx) => cell.padEnd(colWidths[idx])).join('  ');
-          output += rowStr + '\n';
-
-          if (output.length > MAX_OUTPUT_BYTES) {
-            output = output.substring(0, MAX_OUTPUT_BYTES - 64) + '\n[Output limit of 1MB exceeded]\n';
-            await client.end().catch(() => {});
-            process.stdout.write(output, () => {
-              process.exit(0);
-            });
-            return;
-          }
-        }
+        output += formatTable(colNames, r.rows || []);
       } else if (r.command) {
         // Non-SELECT statements (INSERT, CREATE TABLE, etc.)
         if (r.command === 'INSERT') {
@@ -90,23 +113,30 @@ async function main() {
           output += `${r.command}\n`;
         }
       }
+
+      if (Buffer.byteLength(output, 'utf8') > MAX_OUTPUT_BYTES) {
+        output = capOutput(output);
+        await client.end().catch(() => {});
+        process.stdout.write(output, () => {
+          process.exit(0);
+        });
+        return;
+      }
     }
 
-    if (output.length > MAX_OUTPUT_BYTES) {
-      output = output.substring(0, MAX_OUTPUT_BYTES - 64) + '\n[Output limit of 1MB exceeded]\n';
-    }
-
+    output = capOutput(output);
     await client.end().catch(() => {});
     process.stdout.write(output, () => {
       process.exit(0);
     });
   } catch (err) {
+    clearTimeout(wallTimer);
     await client.end().catch(() => {});
 
     // Code 57014 is PostgreSQL's query_canceled (statement_timeout)
     if (err.code === '57014') {
       process.stderr.write('canceling statement due to statement timeout\n', () => {
-        process.exit(124); // Standard exit code for timeout
+        process.exit(124);
       });
       return;
     }

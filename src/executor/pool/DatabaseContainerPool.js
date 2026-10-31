@@ -1,21 +1,29 @@
 import Docker from 'dockerode';
+import Redis from 'ioredis';
+import { v4 as uuidv4 } from 'uuid';
+import config from '../../utils/config.js';
 import logger from '../../utils/logger.js';
 
-class DatabaseContainerPool {
+export class DatabaseContainerPool {
   constructor(docker, options = {}) {
     this.docker = docker || new Docker();
+    this.customRedis = !!options.redis;
+    this.redis = options.redis || (config.redis?.url ? new Redis(config.redis.url) : null);
 
-    const slotId = process.env.WORKER_SLOT_ID || options.workerSlotId;
-    if (!slotId) {
-      throw new Error('WORKER_SLOT_ID environment variable is required for DatabaseContainerPool');
-    }
-    this.workerSlotId = slotId;
+    this.instanceId = options.instanceId || process.env.INSTANCE_ID || `worker-${uuidv4().slice(0, 8)}`;
+    this.workerSlotId = this.instanceId;
 
-    this.targetPoolSize = parseInt(process.env.POSTGRES_POOL_SIZE || options.poolSize || '2', 10);
+    const defaultConcurrency = parseInt(process.env.WORKER_CONCURRENCY || options.concurrency || '2', 10);
+    this.postgresPoolSize = parseInt(process.env.POSTGRES_POOL_SIZE || options.postgresPoolSize || defaultConcurrency, 10);
+    this.mysqlPoolSize = parseInt(process.env.MYSQL_POOL_SIZE || options.mysqlPoolSize || defaultConcurrency, 10);
+    this.targetPoolSize = options.poolSize ? parseInt(options.poolSize, 10) : defaultConcurrency;
+
     this.maxWaiters = parseInt(process.env.POOL_MAX_WAITERS || options.maxWaiters || '16', 10);
     this.acquireTimeoutMs = parseInt(process.env.POOL_ACQUIRE_TIMEOUT_MS || options.acquireTimeoutMs || '10000', 10);
 
     this.trackedContainerIds = new Set();
+    this.inFlightBoots = new Set();
+    this.pendingRemovals = new Set();
     this.isShuttingDown = false;
 
     this.pools = {
@@ -24,7 +32,9 @@ class DatabaseContainerPool {
         waiters: [],
         activeBoots: 0,
         consecutiveFailures: 0,
+        circuitState: 'closed', // 'closed' | 'open' | 'half-open'
         circuitOpenUntil: 0,
+        targetPoolSize: this.postgresPoolSize,
         image: 'codebox/postgres:16',
         name: 'postgres',
         user: '70:70',
@@ -36,7 +46,9 @@ class DatabaseContainerPool {
         waiters: [],
         activeBoots: 0,
         consecutiveFailures: 0,
+        circuitState: 'closed',
         circuitOpenUntil: 0,
+        targetPoolSize: this.mysqlPoolSize,
         image: 'codebox/mysql:8.4',
         name: 'mysql',
         user: '999:999',
@@ -44,6 +56,108 @@ class DatabaseContainerPool {
         readySignal: 'CODEBOX_DAEMON_READY',
       },
     };
+
+    // Setup Redis heartbeat (EX 30, refreshed every 10s)
+    if (this.redis) {
+      this.heartbeatTimer = setInterval(() => {
+        this.sendHeartbeat().catch(() => {});
+      }, 10000);
+      this.heartbeatTimer.unref();
+      this.sendHeartbeat().catch(() => {});
+
+      // Sweep orphaned containers on startup and every 60s
+      this.sweepTimer = setInterval(() => {
+        this.sweepOrphans().catch(() => {});
+      }, 60000);
+      this.sweepTimer.unref();
+    }
+  }
+
+  /**
+   * Update pool configuration dynamically
+   */
+  updateOptions(options = {}) {
+    if (options.postgresPoolSize !== undefined) {
+      this.postgresPoolSize = parseInt(options.postgresPoolSize, 10);
+      this.pools[8].targetPoolSize = this.postgresPoolSize;
+    }
+    if (options.mysqlPoolSize !== undefined) {
+      this.mysqlPoolSize = parseInt(options.mysqlPoolSize, 10);
+      this.pools[9].targetPoolSize = this.mysqlPoolSize;
+    }
+    if (options.poolSize !== undefined) {
+      const ps = parseInt(options.poolSize, 10);
+      this.targetPoolSize = ps;
+      if (options.postgresPoolSize === undefined) this.pools[8].targetPoolSize = ps;
+      if (options.mysqlPoolSize === undefined) this.pools[9].targetPoolSize = ps;
+    }
+    if (options.maxWaiters !== undefined) {
+      this.maxWaiters = parseInt(options.maxWaiters, 10);
+    }
+    if (options.acquireTimeoutMs !== undefined) {
+      this.acquireTimeoutMs = parseInt(options.acquireTimeoutMs, 10);
+    }
+
+    if (!this.isShuttingDown) {
+      this.checkReplenish(8);
+      this.checkReplenish(9);
+    }
+  }
+
+  /**
+   * Send heartbeat to Redis
+   */
+  async sendHeartbeat() {
+    if (!this.redis || this.isShuttingDown) return;
+    try {
+      await this.redis.set(`worker:heartbeat:${this.instanceId}`, 'alive', 'EX', 30);
+    } catch (err) {
+      logger.warn({ event: 'heartbeat_failed', instanceId: this.instanceId, error: err.message });
+    }
+  }
+
+  /**
+   * Sweep orphaned containers older than 60s without an active Redis heartbeat
+   */
+  async sweepOrphans() {
+    if (!this.docker || !this.docker.listContainers) return;
+    try {
+      const list = await this.docker.listContainers({
+        all: true,
+        filters: {
+          label: ['com.codebox.pool=true'],
+        },
+      });
+
+      const now = Date.now();
+      for (const info of list) {
+        const labels = info.Labels || {};
+        const createdAt = parseInt(labels['com.codebox.created_at'] || '0', 10) || (info.Created ? info.Created * 1000 : 0);
+        const ageMs = now - createdAt;
+
+        if (ageMs > 60000) {
+          const instId = labels['com.codebox.instance_id'] || labels['com.codebox.worker_slot'];
+          let isDead = true;
+
+          if (instId && this.redis) {
+            try {
+              const alive = await this.redis.exists(`worker:heartbeat:${instId}`);
+              if (alive) isDead = false;
+            } catch {
+              // Ignore redis check error
+            }
+          }
+
+          if (isDead) {
+            logger.info({ event: 'sweep_removing_orphan', id: info.Id, instId, ageMs });
+            const c = this.docker.getContainer(info.Id);
+            await c.remove({ force: true, v: true }).catch(() => {});
+          }
+        }
+      }
+    } catch (err) {
+      logger.error({ event: 'sweep_orphans_error', error: err.message });
+    }
   }
 
   /**
@@ -62,11 +176,9 @@ class DatabaseContainerPool {
     // 1. Instant Warm Hit: Check available containers
     while (pool.available.length > 0) {
       const container = pool.available.pop();
-      // Verify container is still running
       try {
         const inspect = await container.inspect();
         if (inspect.State.Running) {
-          // Replenish consumed slot asynchronously
           this.checkReplenish(languageId);
           return container;
         }
@@ -79,8 +191,13 @@ class DatabaseContainerPool {
     }
 
     // 2. Circuit Breaker Check
-    if (Date.now() < pool.circuitOpenUntil) {
-      throw new Error(`Database service for ${pool.name} is temporarily degraded. Please retry shortly.`);
+    const now = Date.now();
+    if (pool.circuitState === 'open') {
+      if (now < pool.circuitOpenUntil) {
+        throw new Error(`Database service for ${pool.name} is temporarily degraded. Please retry shortly.`);
+      }
+      // Backoff elapsed: transition to half-open to allow ONE probe boot
+      pool.circuitState = 'half-open';
     }
 
     // 3. Queue Depth Bounds
@@ -111,7 +228,6 @@ class DatabaseContainerPool {
 
       pool.waiters.push(waiter);
 
-      // Trigger replenishment if needed
       this.checkReplenish(languageId);
     });
   }
@@ -120,24 +236,35 @@ class DatabaseContainerPool {
    * Safe release & disposal of an ephemeral container
    */
   release(container) {
-    if (!container) return;
-    this.destroy(container);
+    if (!container) return Promise.resolve();
+    return this.destroy(container);
   }
 
   /**
-   * Destroy container off the critical path
+   * Destroy container off the critical path, tracking pending removals
+   * Returns removal promise
    */
   destroy(container) {
+    if (!container) return Promise.resolve();
     const containerId = container.id || container.Id;
-    this.trackedContainerIds.delete(containerId);
+    if (containerId) {
+      this.trackedContainerIds.delete(containerId);
+    }
 
-    setImmediate(async () => {
+    const removePromise = (async () => {
       try {
-        await container.remove({ force: true });
+        await container.remove({ force: true, v: true });
       } catch (err) {
         logger.warn({ event: 'container_destroy_failed', id: containerId, error: err.message });
       }
+    })();
+
+    this.pendingRemovals.add(removePromise);
+    removePromise.finally(() => {
+      this.pendingRemovals.delete(removePromise);
     });
+
+    return removePromise;
   }
 
   /**
@@ -145,39 +272,72 @@ class DatabaseContainerPool {
    */
   checkReplenish(languageId) {
     const pool = this.pools[languageId];
-    if (this.isShuttingDown || Date.now() < pool.circuitOpenUntil) return;
+    if (this.isShuttingDown) return;
 
+    const now = Date.now();
+    if (pool.circuitState === 'open') {
+      if (now < pool.circuitOpenUntil) return;
+      pool.circuitState = 'half-open';
+    }
+
+    // In half-open state, probe ONE boot at a time
+    if (pool.circuitState === 'half-open') {
+      if (pool.activeBoots > 0) return;
+      this.replenish(languageId).catch(() => {});
+      return;
+    }
+
+    const target = pool.targetPoolSize;
     const currentSlots = pool.available.length + pool.activeBoots;
-    if (currentSlots < this.targetPoolSize) {
-      const needed = this.targetPoolSize - currentSlots;
-      for (let i = 0; i < needed; i++) {
-        this.replenish(languageId).catch(logger.error);
-      }
+    const needed = Math.max(0, target - currentSlots);
+
+    for (let i = 0; i < needed; i++) {
+      this.replenish(languageId).catch(() => {});
     }
   }
 
   /**
-   * Replenish container with leak-proof error handling and First-Ready Handoff
+   * Replenish container with exponential backoff on failure and First-Ready Handoff
    */
   async replenish(languageId) {
     const pool = this.pools[languageId];
-    if (pool.available.length + pool.activeBoots >= this.targetPoolSize) return;
+    if (this.isShuttingDown) return;
+
+    if (pool.circuitState === 'half-open' && pool.activeBoots > 0) return;
+    if (pool.available.length + pool.activeBoots >= pool.targetPoolSize && pool.waiters.length === 0) return;
 
     pool.activeBoots++;
+
+    let bootPromise = null;
     let container = null;
 
     try {
-      container = await this.createAndBootDaemon(languageId);
+      bootPromise = this.createAndBootDaemon(languageId);
+      this.inFlightBoots.add(bootPromise);
+
+      container = await bootPromise;
+
+      if (this.isShuttingDown) {
+        if (container) {
+          this.destroy(container);
+        }
+        return;
+      }
+
+      // Success: reset failures and close circuit
       pool.consecutiveFailures = 0;
+      pool.circuitState = 'closed';
+      pool.circuitOpenUntil = 0;
     } catch (err) {
-      // Decrement boot count on failure
       pool.activeBoots--;
       pool.consecutiveFailures++;
 
-      // Trip circuit breaker after 3 consecutive failures
-      if (pool.consecutiveFailures >= 3) {
+      if (pool.circuitState === 'half-open' || pool.consecutiveFailures >= 3) {
+        // Trip circuit breaker
+        pool.circuitState = 'open';
         const backoffMs = Math.min(1000 * Math.pow(2, pool.consecutiveFailures - 3), 30000);
         pool.circuitOpenUntil = Date.now() + backoffMs;
+
         logger.error({
           event: 'circuit_breaker_tripped',
           language: pool.name,
@@ -185,27 +345,36 @@ class DatabaseContainerPool {
           error: err.message,
         });
 
-        // Fail fast all currently waiting requests
+        // Fail fast currently waiting requests
         while (pool.waiters.length > 0) {
           const w = pool.waiters.shift();
           w.reject(new Error(`Database infrastructure error (${pool.name}): ${err.message}`));
         }
-      } else if (pool.waiters.length > 0) {
-        const waiter = pool.waiters.shift();
-        waiter.reject(new Error(`Failed to initialize database container: ${err.message}`));
+      } else {
+        // Boot failure before circuit trip: retry with exponential backoff instead of rejecting waiter
+        const retryDelay = Math.min(100 * Math.pow(2, pool.consecutiveFailures), 2000);
+        setTimeout(() => {
+          if (!this.isShuttingDown) {
+            this.checkReplenish(languageId);
+          }
+        }, retryDelay).unref();
       }
       return;
+    } finally {
+      if (bootPromise) {
+        this.inFlightBoots.delete(bootPromise);
+      }
     }
 
-    // Decrement counter BEFORE handoff or pushing to available
     pool.activeBoots--;
-    this.trackedContainerIds.add(container.id);
+    if (container && container.id) {
+      this.trackedContainerIds.add(container.id);
+    }
 
     // First-Ready Handoff: deliver to earliest waiting request
     if (pool.waiters.length > 0) {
       const waiter = pool.waiters.shift();
       waiter.resolve(container);
-      // Immediately replenish consumed slot
       this.checkReplenish(languageId);
     } else {
       pool.available.push(container);
@@ -222,12 +391,13 @@ class DatabaseContainerPool {
     try {
       container = await this.docker.createContainer({
         Image: pool.image,
-        User: pool.user || '70:70', // Daemon runs under UID 70 (postgres) or UID 999 (mysql); user queries run as 1001 via exec
+        User: pool.user || '70:70',
         WorkingDir: '/box',
-        NetworkDisabled: true, // Complete network isolation
+        NetworkDisabled: true,
         Labels: {
           'com.codebox.pool': 'true',
-          'com.codebox.worker_slot': this.workerSlotId,
+          'com.codebox.instance_id': this.instanceId,
+          'com.codebox.worker_slot': this.instanceId,
           'com.codebox.created_at': Date.now().toString(),
         },
         HostConfig: {
@@ -238,11 +408,11 @@ class DatabaseContainerPool {
           ReadonlyRootfs: true,
           CapDrop: ['ALL'],
           SecurityOpt: ['no-new-privileges:true'],
-          Memory: 512 * 1024 * 1024,      // 512MB RAM cap
-          MemorySwap: 512 * 1024 * 1024,  // Swap disabled
+          Memory: 512 * 1024 * 1024,
+          MemorySwap: 512 * 1024 * 1024,
           CpuPeriod: 100000,
-          CpuQuota: 100000,               // 1 vCPU
-          PidsLimit: pool.pidsLimit || 64, // 64 for PG, 128 for MySQL
+          CpuQuota: 100000,
+          PidsLimit: pool.pidsLimit || 64,
         },
       });
 
@@ -250,9 +420,8 @@ class DatabaseContainerPool {
       await this.awaitReadySignal(container);
       return container;
     } catch (err) {
-      // LEAK-PROOF: If start or probe fails, immediately destroy container
       if (container) {
-        await container.remove({ force: true }).catch(() => {});
+        await container.remove({ force: true, v: true }).catch(() => {});
       }
       throw err;
     }
@@ -288,40 +457,17 @@ class DatabaseContainerPool {
         // Container might still be starting
       }
 
-      await new Promise(r => setTimeout(r, 25)); // 25ms polling intervals
+      await new Promise(r => setTimeout(r, 25));
     }
 
     throw new Error(`Timeout waiting for daemon readiness (/box/.ready) after ${maxWaitMs}ms`);
   }
 
   /**
-   * Startup sweep: purge orphaned containers belonging strictly to this worker slot
+   * Startup sweep: purge orphaned containers older than 60s
    */
   async startupSweep() {
-    try {
-      const list = await this.docker.listContainers({
-        all: true,
-        filters: {
-          label: [
-            'com.codebox.pool=true',
-            `com.codebox.worker_slot=${this.workerSlotId}`,
-          ],
-        },
-      });
-
-      logger.info({
-        event: 'startup_sweep_scan',
-        slot: this.workerSlotId,
-        count: list.length,
-      });
-
-      for (const info of list) {
-        logger.info({ event: 'purging_orphaned_container', id: info.Id });
-        await this.docker.getContainer(info.Id).remove({ force: true }).catch(() => {});
-      }
-    } catch (err) {
-      logger.error({ event: 'startup_sweep_error', error: err.message });
-    }
+    await this.sweepOrphans();
   }
 
   /**
@@ -335,11 +481,22 @@ class DatabaseContainerPool {
   }
 
   /**
-   * Graceful shutdown: awaits removal of all tracked and available containers
+   * Graceful shutdown: awaits removal of all tracked, available, in-flight boots, and pending removals
    */
   async shutdown() {
     this.isShuttingDown = true;
-    logger.info({ event: 'database_pool_shutdown_started', slot: this.workerSlotId });
+    logger.info({ event: 'database_pool_shutdown_started', instanceId: this.instanceId });
+
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+
+    if (this.redis) {
+      try {
+        await this.redis.del(`worker:heartbeat:${this.instanceId}`);
+      } catch {
+        // Ignore redis cleanup error
+      }
+    }
 
     // Reject all waiting requests immediately
     for (const id of Object.keys(this.pools)) {
@@ -349,29 +506,37 @@ class DatabaseContainerPool {
       }
     }
 
-    // Await removal of all available and tracked containers
-    const removals = [];
+    // Trigger removal of all available containers
     for (const id of Object.keys(this.pools)) {
       const pool = this.pools[id];
       while (pool.available.length > 0) {
         const container = pool.available.pop();
-        removals.push(
-          container.remove({ force: true }).catch(err => {
-            logger.warn({ event: 'shutdown_container_remove_error', error: err.message });
-          })
-        );
+        this.destroy(container);
       }
     }
 
-    // Also remove any remaining tracked containers
+    // Trigger removal of remaining tracked containers
     for (const containerId of this.trackedContainerIds) {
-      removals.push(
-        this.docker.getContainer(containerId).remove({ force: true }).catch(() => {})
-      );
+      if (this.docker && this.docker.getContainer) {
+        this.destroy(this.docker.getContainer(containerId));
+      }
     }
     this.trackedContainerIds.clear();
 
-    await Promise.all(removals);
+    // Await all in-flight boots and all pending removals
+    await Promise.allSettled([
+      ...Array.from(this.inFlightBoots),
+      ...Array.from(this.pendingRemovals),
+    ]);
+
+    if (!this.customRedis && this.redis) {
+      try {
+        await this.redis.quit();
+      } catch {
+        // Ignore quit error
+      }
+    }
+
     logger.info({ event: 'database_pool_shutdown_completed' });
   }
 }
@@ -379,12 +544,17 @@ class DatabaseContainerPool {
 // Singleton instance
 let poolInstance = null;
 
-export function getDatabasePool(docker, options) {
+export function getDatabasePool(docker, options = {}) {
   if (!poolInstance) {
     poolInstance = new DatabaseContainerPool(docker, options);
+  } else if (options && Object.keys(options).length > 0) {
+    poolInstance.updateOptions(options);
   }
   return poolInstance;
 }
 
-export default { DatabaseContainerPool, getDatabasePool };
+export function _resetDatabasePool() {
+  poolInstance = null;
+}
 
+export default { DatabaseContainerPool, getDatabasePool, _resetDatabasePool };

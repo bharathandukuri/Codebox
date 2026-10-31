@@ -102,13 +102,13 @@ const SQL_PATTERNS = [
 const PG_SQL_PATTERNS = [
   { pattern: /\\!/i, reason: 'psql shell escape' },
   { pattern: /\\copy\b/i, reason: 'psql copy escape' },
+  { pattern: /COPY\s+.*PROGRAM/i, reason: 'postgres copy program' },
   { pattern: /ALTER\s+SYSTEM/i, reason: 'postgres alter system' },
 ];
 
 // ── SQL / MySQL patterns (language ID 9) ────────────────────────────────────
 const MYSQL_PATTERNS = [
   { pattern: /\\!/i, reason: 'mysql shell escape' },
-  { pattern: /\bsystem\s+/i, reason: 'mysql system escape' },
   { pattern: /INTO\s+OUTFILE/i, reason: 'mysql into outfile' },
   { pattern: /INTO\s+DUMPFILE/i, reason: 'mysql into dumpfile' },
   { pattern: /LOAD\s+DATA/i, reason: 'mysql load data' },

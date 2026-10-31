@@ -9,8 +9,8 @@ import logger from '../../utils/logger.js';
  * @returns {object} Multi-file execution result
  */
 export async function executeMultiCode(submission) {
-  const executor = getExecutor();
-  const executorType = getExecutorType();
+  const executor = getExecutor(submission.language_id);
+  const executorType = getExecutorType(submission.language_id);
 
   // Pre-execution security scan on all source files
   for (const file of submission.files) {
